@@ -1,8 +1,8 @@
 name: Datos Mallorca
 
-# Genera los datos offline de Mallorca (mapa vectorial, estilo, vias, teselas de enrutado Valhalla y, si toca, satelite
-# PNOA) y los publica en una GitHub Release `datos-<AAAA.MM.DD>-<run>`. La app lee
-# releases/latest/download/manifest.json.
+# Genera los datos offline de Mallorca (mapa vectorial, estilo, vias, indice de busqueda, relieve y curvas de nivel
+# del MDT05, teselas de enrutado Valhalla y, si toca, satelite PNOA) y los publica en una GitHub Release
+# `datos-<AAAA.MM.DD>-<run>`. La app lee releases/latest/download/manifest.json.
 #
 # Tres jobs para que el codigo de terceros (Maven/Planetiler, npm, pip) nunca vea un token con escritura:
 #   decidir  (contents: read)  -> version, etiqueta y si hay que regenerar el satelite. Solo usa `gh`, sin terceros.
@@ -178,9 +178,34 @@ jobs:
           set -euo pipefail
           python -I scripts/vias.py trabajo/data/sources/mallorca.osm.pbf salida/vias-mallorca.tsv.gz
 
+      # Los limites municipales (admin_level=8) se sacan del PBF completo de Baleares, no del recorte: osmium extract no
+      # trae enteras las relaciones que salen del recuadro (Palma incluye Cabrera, fuera de el). tags-filter incluye
+      # por defecto las vias y nodos miembros.
+      - name: Busqueda (indice FTS5 de lugares, calles y POIs)
+        run: |
+          set -euo pipefail
+          osmium tags-filter --overwrite -o trabajo/limites-municipios.osm.pbf \
+            trabajo/geofabrik/islas-baleares-latest.osm.pbf r/admin_level=8
+          python -I scripts/busqueda.py trabajo/data/sources/mallorca.osm.pbf salida/busqueda-mallorca.sqlite \
+            --limites trabajo/limites-municipios.osm.pbf
+
       # Teselas de enrutado para valhalla-mobile: solo ejecuta la imagen oficial de Valhalla (fijada por digest).
       - name: Valhalla (teselas de enrutado)
         run: bash scripts/valhalla.sh trabajo/data/sources/mallorca.osm.pbf salida
+
+      # MDT05 del IGN por WCS -> relieve Terrarium + curvas de nivel (PMTiles). El Python de GDAL es el del sistema.
+      - name: Herramientas de relieve (GDAL, tippecanoe)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gdal-bin python3-gdal python3-numpy tippecanoe
+          gdalinfo --version
+          command -v tippecanoe tile-join
+          /usr/bin/python3 -I -c 'from osgeo import gdal; import numpy; print("python3-gdal", gdal.__version__, "numpy", numpy.__version__)'
+
+      - name: Relieve y curvas de nivel (MDT05)
+        timeout-minutes: 150
+        run: bash scripts/relieve.sh salida
 
       # estilo.mjs resuelve `@protomaps/basemaps` desde su propia carpeta: se copia a estilo/, que tiene package.json y
       # package-lock.json (con integrity), y las dependencias se instalan con `npm ci` sin scripts.
@@ -283,7 +308,7 @@ jobs:
             jq -r '.archivos[] | "- `\(.nombre)`: \((.bytes / 1048576 | floor)) MiB (versión \(.version))"' salida/manifest.json
             echo '- `manifest.json`: índice con SHA-256 que lee la app.'
             echo
-            echo "Atribuciones: © OpenStreetMap contributors (ODbL 1.0); PNOA CC-BY 4.0 scne.es (IGN);"
+            echo "Atribuciones: © OpenStreetMap contributors (ODbL 1.0); PNOA y MDT05 CC-BY 4.0 scne.es (IGN);"
             echo "Protomaps basemaps (BSD-3-Clause, CC0-1.0); fuentes Noto Sans (OFL-1.1)."
           } > trabajo/notas.md
           gh release create "$TAG" salida/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \

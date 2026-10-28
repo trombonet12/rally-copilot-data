@@ -23,9 +23,13 @@ ARCHIVOS = [
     {"id": "vias", "nombre": "vias-mallorca.tsv.gz", "atribucion": "© OpenStreetMap contributors", "licencia": "ODbL-1.0"},
     {"id": "satelite", "nombre": "pnoa-mallorca-z16.pmtiles", "atribucion": "PNOA CC-BY 4.0 scne.es", "licencia": "CC-BY-4.0"},
     {"id": "valhalla", "nombre": "valhalla-mallorca.tar", "atribucion": "© OpenStreetMap contributors", "licencia": "ODbL-1.0"},
+    {"id": "busqueda", "nombre": "busqueda-mallorca.sqlite", "atribucion": "© OpenStreetMap contributors",
+     "licencia": "ODbL-1.0"},
+    {"id": "relieve", "nombre": "relieve-mallorca.pmtiles", "atribucion": "MDT05 CC-BY 4.0 scne.es", "licencia": "CC-BY-4.0"},
+    {"id": "curvas", "nombre": "curvas-mallorca.pmtiles", "atribucion": "MDT05 CC-BY 4.0 scne.es", "licencia": "CC-BY-4.0"},
 ]
 # Archivos que se omiten del manifest si no estan en la carpeta (la app actual solo exige los demas).
-OPCIONALES = {"valhalla"}
+OPCIONALES = {"valhalla", "busqueda", "relieve", "curvas"}
 
 
 def sha256(ruta: str) -> str:
