@@ -1,0 +1,9 @@
+# Directorios de trabajo del workflow y dependencias locales
+trabajo/
+salida/
+previo/
+node_modules/
+__pycache__/
+*.pyc
+*.mbtiles
+*.osm.pbf

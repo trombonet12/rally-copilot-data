@@ -1,0 +1,216 @@
+name: Datos Mallorca
+
+# Genera los datos offline de Mallorca (mapa vectorial, estilo, vias y, si toca, satelite PNOA) y los publica en una
+# GitHub Release `datos-<AAAA.MM.DD>-<run>`. La app lee releases/latest/download/manifest.json.
+on:
+  schedule:
+    - cron: '0 3 1 * *'
+  workflow_dispatch:
+    inputs:
+      satelite:
+        description: 'Regenerar el satelite PNOA (si no, se reutiliza el de la ultima release)'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: datos
+  cancel-in-progress: false
+
+env:
+  # oeste,sur,este,norte
+  BBOX: '2.30,39.26,3.50,39.97'
+  # github.com/protomaps/basemaps (carpeta tiles/)
+  PROTOMAPS_SHA: 42ffaaa4a85a41bfcb23e43cc0f5b492a5eca123
+  # github.com/protomaps/basemaps-assets (sprites y fuentes)
+  ASSETS_SHA: 028c18f713baecad011301ff7a69acc39bcc2ae7
+  BASEMAPS_NPM: '5.7.2'
+  OSMIUM_PIP: '4.3.1'
+  PMTILES: '1.31.2'
+  PMTILES_SHA256: 3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f
+  GEOFABRIK: https://download.geofabrik.de/europe/spain/islas-baleares-latest.osm.pbf
+
+jobs:
+  datos:
+    name: Generar y publicar datos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Tests de los scripts
+        run: |
+          set -euo pipefail
+          python -I -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Herramientas (osmium, pmtiles)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends osmium-tool
+          python -m pip install --disable-pip-version-check -q "osmium==${OSMIUM_PIP}"
+          mkdir -p "$RUNNER_TEMP/pmtiles-dl" "$RUNNER_TEMP/bin"
+          archivo="go-pmtiles_${PMTILES}_Linux_x86_64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/pmtiles-dl/$archivo" \
+            "https://github.com/protomaps/go-pmtiles/releases/download/v${PMTILES}/${archivo}"
+          (cd "$RUNNER_TEMP/pmtiles-dl" && echo "${PMTILES_SHA256}  ${archivo}" | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/pmtiles-dl/$archivo" -C "$RUNNER_TEMP/bin" pmtiles
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          osmium --version
+          "$RUNNER_TEMP/bin/pmtiles" version
+
+      - name: Version y etiqueta
+        run: |
+          set -euo pipefail
+          version="$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}"
+          {
+            echo "VERSION=$version"
+            echo "TAG=datos-$version"
+          } >> "$GITHUB_ENV"
+          mkdir -p salida trabajo/data/sources
+
+      - name: PBF de Baleares (Geofabrik) recortado a Mallorca
+        run: |
+          set -euo pipefail
+          mkdir -p trabajo/geofabrik
+          curl -fsSL --retry 3 -o trabajo/geofabrik/islas-baleares-latest.osm.pbf "$GEOFABRIK"
+          curl -fsSL --retry 3 -o trabajo/geofabrik/islas-baleares-latest.osm.pbf.md5 "${GEOFABRIK}.md5"
+          (cd trabajo/geofabrik && md5sum -c islas-baleares-latest.osm.pbf.md5)
+          osmium extract -b "$BBOX" --strategy=complete_ways --overwrite \
+            -o trabajo/data/sources/mallorca.osm.pbf trabajo/geofabrik/islas-baleares-latest.osm.pbf
+          osmium fileinfo trabajo/data/sources/mallorca.osm.pbf
+
+      - name: Planetiler (protomaps/basemaps) y mapa vectorial
+        run: |
+          set -euo pipefail
+          mkdir -p trabajo/basemaps
+          cd trabajo/basemaps
+          git init -q
+          git remote add origin https://github.com/protomaps/basemaps.git
+          git fetch -q --depth 1 origin "$PROTOMAPS_SHA"
+          git checkout -q FETCH_HEAD
+          cd tiles
+          mvn -B -q package -DskipTests
+          jars=("$PWD"/target/*-with-deps.jar)
+          if [ "${#jars[@]}" -ne 1 ] || [ ! -f "${jars[0]}" ]; then
+            echo "::error::No se encontro un unico *-with-deps.jar"
+            exit 1
+          fi
+          # Planetiler se ejecuta desde trabajo/: busca data/sources/mallorca.osm.pbf y descarga el resto (--download).
+          cd "$GITHUB_WORKSPACE/trabajo"
+          java -Xmx6g -jar "${jars[0]}" --area=mallorca --bounds="$BBOX" --download --maxzoom=15 \
+            --output="$GITHUB_WORKSPACE/salida/mallorca.pmtiles" --force
+
+      - name: Vias (limites de velocidad)
+        run: |
+          set -euo pipefail
+          python -I scripts/vias.py trabajo/data/sources/mallorca.osm.pbf salida/vias-mallorca.tsv.gz
+
+      # estilo.mjs resuelve `@protomaps/basemaps` desde su propia carpeta, asi que se copia junto a node_modules.
+      - name: Estilo del mapa (estilos, sprites y fuentes)
+        run: |
+          set -euo pipefail
+          mkdir -p trabajo/estilo-npm
+          cp scripts/estilo.mjs trabajo/estilo-npm/estilo.mjs
+          cd trabajo/estilo-npm
+          echo '{"private":true}' > package.json
+          npm install --ignore-scripts --no-save --no-audit --no-fund "@protomaps/basemaps@${BASEMAPS_NPM}"
+          node estilo.mjs "$GITHUB_WORKSPACE/trabajo/estilo-mapa" "$ASSETS_SHA"
+          (cd "$GITHUB_WORKSPACE/trabajo/estilo-mapa" && zip -r -q "$GITHUB_WORKSPACE/salida/estilo-mapa.zip" .)
+
+      # Reutiliza el satelite de la ultima release salvo que se pida regenerarlo o no exista.
+      - name: Satelite - decidir y reutilizar
+        id: sat
+        env:
+          SATELITE_INPUT: ${{ inputs.satelite }}
+        run: |
+          set -euo pipefail
+          regenerar=true
+          if [ "$SATELITE_INPUT" != "true" ]; then
+            activos="$(gh release view --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            if printf '%s\n' "$activos" | grep -qx 'pnoa-mallorca-z16.pmtiles' \
+              && printf '%s\n' "$activos" | grep -qx 'manifest.json'; then
+              mkdir -p previo
+              gh release download --repo "$GITHUB_REPOSITORY" --dir previo --clobber \
+                --pattern 'pnoa-mallorca-z16.pmtiles' --pattern 'manifest.json'
+              version_sat="$(jq -r '.archivos[] | select(.id == "satelite") | .version // empty' previo/manifest.json)"
+              if [ -n "$version_sat" ]; then
+                mv previo/pnoa-mallorca-z16.pmtiles salida/pnoa-mallorca-z16.pmtiles
+                echo "VERSION_SAT=$version_sat" >> "$GITHUB_ENV"
+                echo "Satelite reutilizado (version $version_sat)"
+                regenerar=false
+              fi
+            fi
+          fi
+          echo "regenerar=$regenerar" >> "$GITHUB_OUTPUT"
+
+      - name: Satelite - descargar PNOA y convertir
+        if: steps.sat.outputs.regenerar == 'true'
+        run: |
+          set -euo pipefail
+          python -I scripts/satelite.py --bbox "$BBOX" --zmax 16 --salida trabajo/pnoa.mbtiles
+          pmtiles convert trabajo/pnoa.mbtiles salida/pnoa-mallorca-z16.pmtiles
+          echo "VERSION_SAT=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Manifest y comprobaciones
+        run: |
+          set -euo pipefail
+          python -I scripts/manifest.py --carpeta salida --version "$VERSION" --tag "$TAG" \
+            --repo "$GITHUB_REPOSITORY" --version-satelite "$VERSION_SAT"
+          pmtiles show salida/mallorca.pmtiles
+          # Limite de GitHub: 2 GiB por asset.
+          for f in salida/*; do
+            bytes="$(stat -c %s "$f")"
+            echo "$f: $bytes bytes"
+            if [ "$bytes" -ge 2147483648 ]; then
+              echo "::error::$f supera 2 GiB"
+              exit 1
+            fi
+          done
+
+      - name: Publicar release
+        run: |
+          set -euo pipefail
+          {
+            echo "Datos offline de Mallorca para Rally Copilot (versión $VERSION; satélite $VERSION_SAT)."
+            echo
+            echo "Archivos:"
+            jq -r '.archivos[] | "- `\(.nombre)`: \((.bytes / 1048576 | floor)) MiB (versión \(.version))"' salida/manifest.json
+            echo '- `manifest.json`: índice con SHA-256 que lee la app.'
+            echo
+            echo "Atribuciones: © OpenStreetMap contributors (ODbL 1.0); PNOA CC-BY 4.0 scne.es (IGN);"
+            echo "Protomaps basemaps (BSD-3-Clause, CC0-1.0); fuentes Noto Sans (OFL-1.1)."
+          } > trabajo/notas.md
+          gh release create "$TAG" salida/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "Datos Mallorca $VERSION" --notes-file trabajo/notas.md
+
+      # El satelite se vuelve a subir en cada release, asi que las antiguas se pueden borrar sin perderlo.
+      - name: Retencion (ultimas 3 releases de datos)
+        run: |
+          set -euo pipefail
+          antiguas="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("datos-"))] | sort_by(.createdAt) | reverse | .[3:] | .[].tagName')"
+          for t in $antiguas; do
+            echo "Borrando release antigua $t"
+            gh release delete "$t" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y
+          done

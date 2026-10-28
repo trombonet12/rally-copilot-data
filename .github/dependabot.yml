@@ -1,0 +1,15 @@
+# Dependabot: solo GitHub Actions (las acciones van fijadas por SHA). Mensual, minor+patch agrupados.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(ci)'
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
