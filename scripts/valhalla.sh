@@ -39,6 +39,8 @@ vh() {
 echo "Imagen: $VALHALLA_IMAGE"
 vh valhalla_build_config \
   --mjolnir-tile-dir /work/tiles \
+  --mjolnir-include-bicycle false \
+  --mjolnir-include-pedestrian false \
   --mjolnir-tile-extract "/work/$nombre_tar" \
   --mjolnir-admin /work/admin.sqlite \
   --mjolnir-timezone /work/tz_world.sqlite \
