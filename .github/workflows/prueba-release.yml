@@ -1,0 +1,19 @@
+name: Prueba release (temporal)
+on: workflow_dispatch
+permissions: {}
+jobs:
+  prueba:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Crear y borrar una release de prueba
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo hola > prueba.txt
+          gh release create prueba-permisos prueba.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title prueba --notes prueba --draft || echo "FALLO draft"
+          gh release create prueba-permisos2 prueba.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title prueba --notes prueba || echo "FALLO normal"
+          gh release delete prueba-permisos --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
+          gh release delete prueba-permisos2 --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
