@@ -1,0 +1,8 @@
+{
+  "name": "estilo-rally-copilot-data",
+  "private": true,
+  "description": "Dependencia npm de scripts/estilo.mjs (el workflow copia el script aqui y usa npm ci).",
+  "dependencies": {
+    "@protomaps/basemaps": "5.7.2"
+  }
+}

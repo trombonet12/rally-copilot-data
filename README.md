@@ -38,14 +38,24 @@ La app lee ese manifest y descarga las `url` de los archivos cuyo SHA-256 no coi
   *Actions*.
 
 Versiones fijadas en `.github/workflows/datos.yml`: Planetiler vía `protomaps/basemaps` (SHA), `basemaps-assets` (SHA),
-`@protomaps/basemaps` (npm), `osmium` (pip) y `pmtiles` (con comprobación de SHA-256). Las acciones van fijadas por SHA
-y las actualiza Dependabot cada mes.
+`osmium` (pip) y `pmtiles` (con comprobación de SHA-256). `@protomaps/basemaps` (npm) está fijado con lockfile
+(`estilo/package.json` y `estilo/package-lock.json`) y se instala con `npm ci --ignore-scripts`. Las acciones van
+fijadas por SHA y las actualiza Dependabot cada mes.
+
+## Seguridad del workflow
+
+- Tres jobs: `decidir` y `build` solo tienen `contents: read`; el código de terceros (Maven/Planetiler, npm, pip) se
+  ejecuta en `build`, sin `GH_TOKEN`. Solo `publicar` tiene `contents: write`: descarga el artefacto, genera el
+  manifest, crea la release y aplica la retención.
+- El satélite reutilizado de la release anterior se verifica contra el SHA-256 de su `manifest.json` antes de usarlo.
+- **Riesgos conocidos sin mitigar**: `osmium` de PyPI se fija por versión pero no por hash, y Planetiler descarga con
+  `--download` fuentes auxiliares (p. ej. Natural Earth, datos de agua) sin comprobar su hash.
 
 ## Scripts
 
 - `scripts/vias.py`: extrae las vías del PBF a TSV comprimido.
 - `scripts/satelite.py`: descarga las teselas PNOA a un MBTiles (reanudable).
-- `scripts/estilo.mjs`: genera estilos, sprites y fuentes.
+- `scripts/estilo.mjs`: genera estilos, sprites y fuentes (dependencia npm en `estilo/`).
 - `scripts/manifest.py`: escribe `manifest.json`.
 - `scripts/test_scripts.py`: pruebas sin red (`python -I -m unittest discover -s scripts -p 'test_*.py'`).
 
