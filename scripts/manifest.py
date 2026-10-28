@@ -4,7 +4,7 @@ Uso: python -I scripts/manifest.py --carpeta salida --version 2026.10.28-1 --tag
          --repo trombonet12/rally-copilot-data [--version-satelite 2026.10.28-1]
 
 La app lee https://github.com/<repo>/releases/latest/download/manifest.json y baja solo los archivos cuyo SHA-256
-no coincide con el que ya tiene. `version` de cada archivo = release en la que se generó (el satélite se reutiliza
+no coincide con el que ya tiene. Los archivos opcionales (OPCIONALES) que no existan en la carpeta no se incluyen. `version` de cada archivo = release en la que se generó (el satélite se reutiliza
 entre releases y conserva la suya).
 """
 
@@ -22,7 +22,10 @@ ARCHIVOS = [
      "atribucion": "Protomaps basemaps; fuentes Noto Sans", "licencia": "BSD-3-Clause, CC0-1.0, OFL-1.1"},
     {"id": "vias", "nombre": "vias-mallorca.tsv.gz", "atribucion": "© OpenStreetMap contributors", "licencia": "ODbL-1.0"},
     {"id": "satelite", "nombre": "pnoa-mallorca-z16.pmtiles", "atribucion": "PNOA CC-BY 4.0 scne.es", "licencia": "CC-BY-4.0"},
+    {"id": "valhalla", "nombre": "valhalla-mallorca.tar", "atribucion": "© OpenStreetMap contributors", "licencia": "ODbL-1.0"},
 ]
+# Archivos que se omiten del manifest si no estan en la carpeta (la app actual solo exige los demas).
+OPCIONALES = {"valhalla"}
 
 
 def sha256(ruta: str) -> str:
@@ -37,6 +40,8 @@ def construir(carpeta: str, version: str, tag: str, repo: str, version_satelite:
     archivos = []
     for a in ARCHIVOS:
         ruta = os.path.join(carpeta, a["nombre"])
+        if a["id"] in OPCIONALES and not os.path.isfile(ruta):
+            continue
         version_archivo = version_satelite if a["id"] == "satelite" and version_satelite else version
         archivos.append({
             **a,

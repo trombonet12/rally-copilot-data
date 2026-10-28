@@ -1,7 +1,8 @@
 name: Datos Mallorca
 
-# Genera los datos offline de Mallorca (mapa vectorial, estilo, vias y, si toca, satelite PNOA) y los publica en una
-# GitHub Release `datos-<AAAA.MM.DD>-<run>`. La app lee releases/latest/download/manifest.json.
+# Genera los datos offline de Mallorca (mapa vectorial, estilo, vias, teselas de enrutado Valhalla y, si toca, satelite
+# PNOA) y los publica en una GitHub Release `datos-<AAAA.MM.DD>-<run>`. La app lee
+# releases/latest/download/manifest.json.
 #
 # Tres jobs para que el codigo de terceros (Maven/Planetiler, npm, pip) nunca vea un token con escritura:
 #   decidir  (contents: read)  -> version, etiqueta y si hay que regenerar el satelite. Solo usa `gh`, sin terceros.
@@ -37,6 +38,9 @@ env:
   PMTILES: '1.31.2'
   PMTILES_SHA256: 3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f
   GEOFABRIK: https://download.geofabrik.de/europe/spain/islas-baleares-latest.osm.pbf
+  # Debe coincidir con la version de Valhalla que lleva valhalla-mobile (0.6.4 -> submodulo Valhalla 3.9.1).
+  # Digest del indice multi-arquitectura de la etiqueta 3.9.1 (obtenido del registro ghcr.io).
+  VALHALLA_IMAGE: ghcr.io/valhalla/valhalla:3.9.1@sha256:4fd114eb1d26b8fc2f43bcb3df234c1b63a0bf13c277405e5943d5361dc575de
 
 jobs:
   decidir:
@@ -173,6 +177,10 @@ jobs:
         run: |
           set -euo pipefail
           python -I scripts/vias.py trabajo/data/sources/mallorca.osm.pbf salida/vias-mallorca.tsv.gz
+
+      # Teselas de enrutado para valhalla-mobile: solo ejecuta la imagen oficial de Valhalla (fijada por digest).
+      - name: Valhalla (teselas de enrutado)
+        run: bash scripts/valhalla.sh trabajo/data/sources/mallorca.osm.pbf salida
 
       # estilo.mjs resuelve `@protomaps/basemaps` desde su propia carpeta: se copia a estilo/, que tiene package.json y
       # package-lock.json (con integrity), y las dependencias se instalan con `npm ci` sin scripts.

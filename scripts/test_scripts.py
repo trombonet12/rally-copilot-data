@@ -39,6 +39,8 @@ class ManifestTest(unittest.TestCase):
     def test_construye_entradas_con_hash_tamano_y_url(self):
         with tempfile.TemporaryDirectory() as carpeta:
             for a in manifest.ARCHIVOS:
+                if a["id"] in manifest.OPCIONALES:
+                    continue
                 with open(os.path.join(carpeta, a["nombre"]), "wb") as f:
                     f.write(b"abc")
             m = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", "2026.10.01-1", "T")
@@ -52,6 +54,30 @@ class ManifestTest(unittest.TestCase):
         sat = next(a for a in m["archivos"] if a["id"] == "satelite")
         self.assertEqual(sat["version"], "2026.10.01-1")
         json.dumps(m)
+
+    def test_valhalla_es_opcional_y_se_incluye_si_existe(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            for a in manifest.ARCHIVOS:
+                if a["id"] in manifest.OPCIONALES:
+                    continue
+                with open(os.path.join(carpeta, a["nombre"]), "wb") as f:
+                    f.write(b"abc")
+            sin = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", None, "T")
+            with open(os.path.join(carpeta, "valhalla-mallorca.tar"), "wb") as f:
+                f.write(b"abc")
+            con = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", None, "T")
+        self.assertNotIn("valhalla", {a["id"] for a in sin["archivos"]})
+        valhalla = next(a for a in con["archivos"] if a["id"] == "valhalla")
+        self.assertEqual(valhalla["sha256"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        self.assertEqual(valhalla["atribucion"], "© OpenStreetMap contributors")
+        self.assertEqual(
+            valhalla["url"], "https://github.com/o/r/releases/download/datos-2026.10.28-1/valhalla-mallorca.tar")
+        self.assertEqual({a["id"] for a in con["archivos"]} - {a["id"] for a in sin["archivos"]}, {"valhalla"})
+
+    def test_archivo_obligatorio_ausente_falla(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            with self.assertRaises(OSError):
+                manifest.construir(carpeta, "v", "t", "o/r", None, "T")
 
 
 if __name__ == "__main__":
