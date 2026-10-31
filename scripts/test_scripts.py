@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import busqueda  # noqa: E402
 import manifest  # noqa: E402
 import satelite  # noqa: E402
+import vias_notas  # noqa: E402
 
 MALLORCA = (2.30, 39.26, 3.50, 39.97)
 
@@ -93,7 +94,7 @@ class ManifestTest(unittest.TestCase):
                 with open(os.path.join(carpeta, nombre), "wb") as f:
                     f.write(b"abc")
             con = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", None, "T")
-        self.assertEqual(manifest.OPCIONALES, {"valhalla", "busqueda", "relieve", "curvas"})
+        self.assertEqual(manifest.OPCIONALES, {"valhalla", "busqueda", "relieve", "curvas", "vias-notas"})
         self.assertTrue({"busqueda", "relieve", "curvas"}.isdisjoint({a["id"] for a in sin["archivos"]}))
         por_id = {a["id"]: a for a in con["archivos"]}
         self.assertEqual(por_id["busqueda"]["atribucion"], "© OpenStreetMap contributors")
@@ -103,6 +104,127 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(
             por_id["curvas"]["url"], "https://github.com/o/r/releases/download/datos-2026.10.28-1/curvas-mallorca.pmtiles")
         self.assertEqual(por_id["relieve"]["sha256"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+
+    def test_vias_notas_es_opcional_con_su_atribucion(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            for a in manifest.ARCHIVOS:
+                if a["id"] in manifest.OPCIONALES:
+                    continue
+                with open(os.path.join(carpeta, a["nombre"]), "wb") as f:
+                    f.write(b"abc")
+            sin = manifest.construir(carpeta, "v", "t", "o/r", None, "T")
+            with open(os.path.join(carpeta, "vias-notas-mallorca.tsv.gz"), "wb") as f:
+                f.write(b"abc")
+            con = manifest.construir(carpeta, "v", "t", "o/r", None, "T")
+        self.assertNotIn("vias-notas", {a["id"] for a in sin["archivos"]})
+        notas = next(a for a in con["archivos"] if a["id"] == "vias-notas")
+        self.assertEqual(notas["nombre"], "vias-notas-mallorca.tsv.gz")
+        self.assertEqual(notas["atribucion"], "© OpenStreetMap contributors; MDT05 CC-BY 4.0 scne.es")
+        self.assertEqual(notas["licencia"], "ODbL-1.0, CC-BY-4.0")
+
+
+class ViasNotasTest(unittest.TestCase):
+    # 1000 millonésimas de grado de latitud = R * rad(0.001°) ≈ 111,195 m.
+    def test_distancia_de_un_meridiano(self):
+        self.assertAlmostEqual(vias_notas.distancia_m((39_000_000, 3_000_000), (39_001_000, 3_000_000)), 111.195, delta=0.01)
+
+    def test_muestreo_cada_5_m_desde_el_primer_nodo_mas_el_ultimo(self):
+        puntos = [(39_000_000, 3_000_000), (39_001_000, 3_000_000)]
+        distancias, alturas = vias_notas.muestrear(puntos, lambda lat, lon: (lat - 39.0) * 1e5)
+        total = vias_notas.distancia_m(*puntos)
+        self.assertEqual(len(distancias), 24)  # ceil(111,195 / 5) = 23 muestras + el último punto
+        self.assertEqual(distancias[:4], [0.0, 5.0, 10.0, 15.0])
+        self.assertAlmostEqual(distancias[22], 110.0)
+        self.assertAlmostEqual(distancias[-1], total)
+        self.assertAlmostEqual(alturas[0], 0.0)
+        self.assertAlmostEqual(alturas[1], 4.4966, delta=0.01)  # 5 m = 4,4966e-5° de latitud -> *1e5
+        self.assertAlmostEqual(alturas[-1], 100.0, delta=0.01)  # 0,001° * 1e5
+
+    def test_muestreo_con_una_esquina_sigue_la_polilinea(self):
+        # Tramo norte de ~111,2 m y luego tramo este: la 2.ª muestra tras la esquina está al este de ella.
+        puntos = [(39_000_000, 3_000_000), (39_001_000, 3_000_000), (39_001_000, 3_001_000)]
+        pos = vias_notas.posiciones(puntos)
+        esquina = vias_notas.distancia_m(puntos[0], puntos[1])
+        despues = [p for p in pos if p[0] > esquina + 1e-9 and p is not pos[-1]]
+        self.assertTrue(despues)
+        for _, lat, lon in despues:
+            self.assertAlmostEqual(lat, 39.001, places=6)
+            self.assertGreater(lon, 3.0)
+        total = esquina + vias_notas.distancia_m(puntos[1], puntos[2])
+        self.assertAlmostEqual(pos[-1][0], total)
+        self.assertAlmostEqual(pos[-1][2], 3.001, places=6)
+
+    def test_polilineas_degeneradas(self):
+        self.assertEqual(vias_notas.posiciones([]), [])
+        self.assertEqual(vias_notas.posiciones([(39_000_000, 3_000_000)]), [(0.0, 39.0, 3.0)])
+        iguales = vias_notas.posiciones([(39_000_000, 3_000_000), (39_000_000, 3_000_000)])
+        self.assertEqual(iguales, [(0.0, 39.0, 3.0)])
+
+    def test_codificacion_delta_y_ida_y_vuelta(self):
+        self.assertEqual(vias_notas.codificar_delta([12.34, 12.36, 12.0, 11.5]), "123,1,-4,-5")
+        self.assertEqual(vias_notas.codificar_delta([0.0]), "0")
+        self.assertEqual(vias_notas.codificar_delta([-0.04, 0.0, 0.0]), "0,0,0")
+        self.assertEqual(vias_notas.decodificar_delta("123,1,-4,-5"), [123, 124, 120, 115])
+        alturas = [0.0, 3.26, 9.99, 9.99, 4.5, -0.3]
+        dm = [vias_notas.decimetros(h) for h in alturas]
+        self.assertEqual(vias_notas.decodificar_delta(vias_notas.codificar_delta(alturas)), dm)
+
+    def test_puentes_y_tuneles_interpolan_entre_los_extremos(self):
+        self.assertEqual(
+            vias_notas.aplanar_puente([0, 5, 10, 15, 20], [10, 99, -5, 50, 20]), [10, 12.5, 15, 17.5, 20])
+        # Última muestra a distancia no múltiplo de 5: la interpolación es por distancia, no por índice.
+        interpolado = vias_notas.aplanar_puente([0, 5, 8], [0, 77, 8])
+        self.assertAlmostEqual(interpolado[1], 5.0)
+        self.assertEqual(vias_notas.aplanar_puente([0, 3], [4, 9]), [4, 9])
+
+    def test_estructuras_desde_las_lineas_v(self):
+        lineas = [
+            "V\t1\tyes\t\t\t\t\t\t\n",
+            "V\t2\t\tbuilding_passage\t\t\t\t\t\n",
+            "V\t3\tno\tno\troundabout\t2\t\t\tasphalt\n",
+            "V\t4\t\t\t\t\t\t\tgravel\n",
+            "N\t39000000,3000000\tbump\n",
+        ]
+        self.assertEqual(vias_notas.ids_estructuras(lineas), {"1", "2"})
+
+    def test_etiquetas_de_via(self):
+        self.assertIsNone(vias_notas.campos_via({"highway": "primary", "name": "Ma-10"}))
+        self.assertEqual(
+            vias_notas.campos_via({"bridge": "viaduct", "lanes": "2", "surface": "asphalt", "width": "6\t5"}),
+            ["viaduct", "", "", "2", "6 5", "", "asphalt"])
+        self.assertEqual(
+            vias_notas.campos_via({"junction": "roundabout", "hazard": "animals"}),
+            ["", "", "roundabout", "", "", "animals", ""])
+
+    def test_tipo_de_nodo(self):
+        tipo = vias_notas.tipo_nodo
+        self.assertEqual(tipo({"traffic_calming": "bump"}), "bump")
+        self.assertEqual(tipo({"traffic_calming": "table"}), "table")
+        self.assertEqual(tipo({"traffic_calming": "hump"}), "hump")
+        self.assertIsNone(tipo({"traffic_calming": "no"}))
+        self.assertEqual(tipo({"ford": "yes"}), "ford")
+        self.assertIsNone(tipo({"ford": "no"}))
+        self.assertEqual(tipo({"railway": "level_crossing"}), "level_crossing")
+        self.assertIsNone(tipo({"railway": "station"}))
+        for valor in ("stop", "give_way", "traffic_signals"):
+            self.assertEqual(tipo({"highway": valor}), valor)
+        self.assertIsNone(tipo({"highway": "crossing"}))
+        self.assertEqual(tipo({"hazard": "animals"}), "hazard:animals")
+        self.assertIsNone(tipo({"hazard": "no"}))
+        self.assertIsNone(tipo({}))
+        self.assertEqual(tipo({"highway": "stop", "traffic_calming": "bump"}), "bump")
+
+    def test_lectura_de_via(self):
+        linea = "42\tprimary\t90\t\t\tyes\tMa-10\tCarretera\t39000000,3000000;39001000,3000500\n"
+        self.assertEqual(vias_notas.leer_via(linea), ("42", [(39_000_000, 3_000_000), (39_001_000, 3_000_500)]))
+
+    def test_bilineal(self):
+        valores = {(0, 0): 0.0, (1, 0): 10.0, (0, 1): 20.0, (1, 1): 30.0}
+        pixel = lambda c, f: valores[(c, f)]  # noqa: E731
+        self.assertAlmostEqual(vias_notas.bilineal(pixel, 1.0, 1.0), 15.0)  # esquina común de los 4 píxeles
+        self.assertAlmostEqual(vias_notas.bilineal(pixel, 0.5, 0.5), 0.0)  # centro del píxel (0, 0)
+        self.assertAlmostEqual(vias_notas.bilineal(pixel, 1.0, 0.5), 5.0)
 
 
 class ClasificacionBusquedaTest(unittest.TestCase):

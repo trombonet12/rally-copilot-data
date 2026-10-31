@@ -178,6 +178,13 @@ jobs:
           set -euo pipefail
           python -I scripts/vias.py trabajo/data/sources/mallorca.osm.pbf salida/vias-mallorca.tsv.gz
 
+      # Etiquetas para el motor de notas (puentes, tuneles, badenes, cruces...). El perfil de altura se anade despues
+      # de descargar el MDT05 (paso «Perfil de altura de las vias»), que une todo en vias-notas-mallorca.tsv.gz.
+      - name: Vias - etiquetas para las notas
+        run: |
+          set -euo pipefail
+          python -I scripts/vias_notas.py etiquetas trabajo/data/sources/mallorca.osm.pbf trabajo/vias-notas-etiquetas.tsv
+
       # Los limites municipales (admin_level=8) se sacan del PBF completo de Baleares, no del recorte: osmium extract no
       # trae enteras las relaciones que salen del recuadro (Palma incluye Cabrera, fuera de el). tags-filter incluye
       # por defecto las vias y nodos miembros.
@@ -206,6 +213,14 @@ jobs:
       - name: Relieve y curvas de nivel (MDT05)
         timeout-minutes: 150
         run: bash scripts/relieve.sh salida
+
+      # Reutiliza el VRT del MDT05 que deja relieve.sh en trabajo/relieve (no lo borra). Si falla, falla el job.
+      - name: Perfil de altura de las vias (MDT05)
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I scripts/vias_notas.py perfil salida/vias-mallorca.tsv.gz trabajo/relieve/mdt05.vrt \
+            trabajo/vias-notas-etiquetas.tsv salida/vias-notas-mallorca.tsv.gz
 
       # estilo.mjs resuelve `@protomaps/basemaps` desde su propia carpeta: se copia a estilo/, que tiene package.json y
       # package-lock.json (con integrity), y las dependencias se instalan con `npm ci` sin scripts.

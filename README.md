@@ -17,6 +17,7 @@ release y solo baja los que han cambiado.
 | `busqueda-mallorca.sqlite` | Índice de búsqueda: SQLite con la tabla `lugares` (lugares, calles y POIs con nombre; sin FTS5). Opcional (`id` `busqueda`) | OpenStreetMap |
 | `relieve-mallorca.pmtiles` | Relieve para sombreado (`raster-dem` Terrarium, teselas PNG de 512 px, z7–13, alturas a 0,25 m). Opcional (`id` `relieve`) | MDT05, IGN |
 | `curvas-mallorca.pmtiles` | Curvas de nivel cada 10 m (capa `curvas`, z11–14; atributos `ele` e `indice` = 1 cada 50 m). Opcional (`id` `curvas`) | MDT05, IGN |
+| `vias-notas-mallorca.tsv.gz` | Etiquetas de vías y nodos de OSM y perfil de altura (5 m) de cada vía, para las notas de rally (formato `#vias-notas v1`, ver abajo). Opcional (`id` `vias-notas`) | OpenStreetMap, MDT05 (IGN) |
 | `manifest.json` | Índice: versión, tamaño, SHA-256, URL y atribución de cada archivo | Generado |
 
 Cada archivo del manifest lleva su propia `version`. El satélite cambia rara vez: se reutiliza el de la release
@@ -80,6 +81,26 @@ anterior y conserva su versión.
 - En los estilos (`vectorial.json`, `satelite.json`) las fuentes `relieve` y `curvas` y las capas `relieve-sombra`, `curvas-linea`,
   `curvas-indice` y `curvas-etiqueta` van con `layout.visibility: "none"`: la app las enciende. Atribución: «MDT05 CC-BY 4.0 scne.es».
 
+### Vías para las notas de rally (`vias-notas-mallorca.tsv.gz`)
+
+- `scripts/vias_notas.py etiquetas` (pyosmium) saca las etiquetas del PBF y `scripts/vias_notas.py perfil` (Python del sistema con
+  `python3-gdal`) muestrea el VRT del MDT05 que deja `relieve.sh` en `trabajo/relieve/mdt05.vrt`. No cambia `vias-mallorca.tsv.gz`.
+- Formato v1: UTF-8, campos separados por tabulador, primera línea `#vias-notas v1`:
+
+  ```
+  V  id_via  bridge  tunnel  junction  lanes  width  hazard  surface     (vacíos si no hay; solo vías con alguna)
+  N  lat_e6,lon_e6  tipo                                                 (nodos, en millonésimas de grado)
+  P  id_via  5  z0_dm,d1,d2,...                                          (una por cada vía de vias-mallorca)
+  ```
+- `tipo` de `N`: valor de `traffic_calming` (`bump`, `hump`, `table`…), `ford`, `level_crossing`, `stop`, `give_way`,
+  `traffic_signals` o `hazard:<valor>`. Las clases de vía son las de `vias.py`.
+- `P`: altura del MDT05 (interpolación bilineal) en decímetros enteros cada 5 m a lo largo de la polilínea de la vía en
+  `vias-mallorca` (mismo `id`): muestras a 0, 5, 10… m desde el primer nodo y una última en el último nodo (L = longitud;
+  nº de muestras = ceil(L/5) + 1; distancia equirrectangular, R = 6371000 m). El primer valor es absoluto y los demás,
+  diferencias con el anterior. En vías con `bridge`/`tunnel` la altura interior se interpola linealmente entre los extremos
+  (el MDT es terreno desnudo). Mar, sin dato o fuera del MDT: 0.
+- Atribución: «© OpenStreetMap contributors; MDT05 CC-BY 4.0 scne.es» (ODbL-1.0, CC-BY-4.0).
+
 ### Placas de carretera
 
 `estilo.mjs` sustituye la capa `roads_shields` de Protomaps (solo pinta rutas con `network`) por tres capas de símbolo con la
@@ -128,6 +149,7 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 ## Scripts
 
 - `scripts/vias.py`: extrae las vías del PBF a TSV comprimido.
+- `scripts/vias_notas.py`: etiquetas de OSM y perfil de altura de las vías (`vias-notas-mallorca.tsv.gz`).
 - `scripts/busqueda.py`: genera el índice de búsqueda SQLite (`busqueda-mallorca.sqlite`).
 - `scripts/relieve.sh`: MDT05 por WCS -> `relieve-mallorca.pmtiles` y `curvas-mallorca.pmtiles` (GDAL, tippecanoe).
 - `scripts/satelite.py`: descarga las teselas PNOA a un MBTiles (reanudable).
