@@ -30,7 +30,7 @@ const PNOA = "PNOA CC-BY 4.0 scne.es";
 const MDT = "MDT05 CC-BY 4.0 scne.es";
 
 // --- placas:inicio (el generador de sprites no depende de nada del resto del archivo) ---------------------------
-// Tabla de DECISIONES (placas): azul AP-/A-/autovía, naranja Ma- de 1-2 cifras, amarillo Ma- de 4 cifras.
+// Tabla de DECISIONES (placas): azul AP-/A-, naranja Ma- de 1-2 cifras (también autovías: Ma-19, Ma-13), amarillo Ma- de 4 cifras (en Mallorca no hay de 3); por matrícula, no por tipo de vía.
 // VERIFICAR colores reales (hex no oficiales, ver docs/investigacion/carteleria.md en el repo de la app).
 const PLACAS = [
   { nombre: "placa-azul", fondo: [0x02, 0x4d, 0xa1], borde: [0xff, 0xff, 0xff], texto: "#FFFFFF" },
@@ -155,7 +155,6 @@ const REF1 = [
 ];
 const empieza = (prefijo) => ["==", ["slice", REF1, 0, prefijo.length], prefijo];
 const LARGO = ["length", REF1];
-const ES_AUTOVIA = ["==", ["get", "kind_detail"], "motorway"];
 // Sin `["in", …]` en los filtros: en la sintaxis antigua `in` significa otra cosa y MapLibre Native podria interpretar
 // el filtro entero como antiguo.
 const BASE_PLACA = [
@@ -165,11 +164,12 @@ const BASE_PLACA = [
   ["!=", ["get", "ref"], ""],
 ];
 const PLACAS_CAPAS = [
-  // [placa, minzoom, filtro]. Orden de reglas: autovía/AP-/A- (azul); Ma- de 1-2 cifras con sufijo (≤ 6 caracteres:
-  // «Ma-15A») naranja; Ma- de 4 cifras con sufijo (7-8 caracteres: «Ma-1110», «Ma-1110a») amarillo.
-  ["placa-azul", 9, ["all", BASE_PLACA, ["any", ES_AUTOVIA, empieza("AP-"), empieza("A-")]]],
-  ["placa-naranja", 10, ["all", BASE_PLACA, ["!", ES_AUTOVIA], empieza("Ma-"), ["<=", LARGO, 6]]],
-  ["placa-amarilla", 12, ["all", BASE_PLACA, ["!", ES_AUTOVIA], empieza("Ma-"), [">=", LARGO, 7], ["<=", LARGO, 8]]],
+  // [placa, minzoom, filtro]. Color por matrícula, no por tipo de vía (decisión 2026-10-31, Joan): AP-/A- azul; Ma- de
+  // 1-2 cifras con sufijo (≤ 6 caracteres: «Ma-15A», «Ma-19») naranja; Ma- de 4 cifras con sufijo (7-8 caracteres:
+  // «Ma-1110», «Ma-1110a») amarillo.
+  ["placa-azul", 9, ["all", BASE_PLACA, ["any", empieza("AP-"), empieza("A-")]]],
+  ["placa-naranja", 10, ["all", BASE_PLACA, empieza("Ma-"), ["<=", LARGO, 6]]],
+  ["placa-amarilla", 12, ["all", BASE_PLACA, empieza("Ma-"), [">=", LARGO, 7], ["<=", LARGO, 8]]],
 ];
 
 function capasPlacas() {
