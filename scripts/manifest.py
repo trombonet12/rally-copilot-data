@@ -1,11 +1,15 @@
 """Escribe manifest.json con versión, tamaño y SHA-256 de cada archivo de la release.
 
 Uso: python -I scripts/manifest.py --carpeta salida --version 2026.10.28-1 --tag datos-2026.10.28-1 \
-         --repo trombonet12/rally-copilot-data [--version-satelite 2026.10.28-1]
+         --repo trombonet12/rally-copilot-data [--version-satelite 2026.10.28-1] [--version-z17 2026.11.01-1]
 
 La app lee https://github.com/<repo>/releases/latest/download/manifest.json y baja solo los archivos cuyo SHA-256
 no coincide con el que ya tiene. Los archivos opcionales (OPCIONALES) que no existan en la carpeta no se incluyen. `version` de cada archivo = release en la que se generó (el satélite se reutiliza
 entre releases y conserva la suya).
+
+Los archivos de SEPARADOS (satélite z17) NO van en manifest.json sino en manifest-extra.json (mismo esquema, mismo
+formato de entrada): las apps ya instaladas descargan TODO lo que lista manifest.json (no ignoran ids desconocidos) y un
+z17 de ~1 GB les rompería la actualización por el límite de espacio. Solo una app que lo pida lee manifest-extra.json.
 """
 
 import argparse
@@ -29,9 +33,14 @@ ARCHIVOS = [
     {"id": "curvas", "nombre": "curvas-mallorca.pmtiles", "atribucion": "MDT05 CC-BY 4.0 scne.es", "licencia": "CC-BY-4.0"},
     {"id": "vias-notas", "nombre": "vias-notas-mallorca.tsv.gz",
      "atribucion": "© OpenStreetMap contributors; MDT05 CC-BY 4.0 scne.es", "licencia": "ODbL-1.0, CC-BY-4.0"},
+    {"id": "satelite-z17", "nombre": "pnoa-mallorca-z17.pmtiles", "atribucion": "PNOA CC-BY 4.0 scne.es",
+     "licencia": "CC-BY-4.0"},
 ]
 # Archivos que se omiten del manifest si no estan en la carpeta (la app actual solo exige los demas).
-OPCIONALES = {"valhalla", "busqueda", "relieve", "curvas", "vias-notas"}
+OPCIONALES = {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "satelite-z17"}
+# Opcionales que van en manifest-extra.json y nunca en manifest.json (ver la docstring del modulo).
+SEPARADOS = {"satelite-z17"}
+NOMBRE_EXTRA = "manifest-extra.json"
 
 
 def sha256(ruta: str) -> str:
@@ -42,20 +51,29 @@ def sha256(ruta: str) -> str:
     return h.hexdigest()
 
 
-def construir(carpeta: str, version: str, tag: str, repo: str, version_satelite: str | None, ahora: str) -> dict:
+def _entradas(carpeta: str, version: str, tag: str, repo: str, versiones: dict[str, str | None], separados: bool):
     archivos = []
     for a in ARCHIVOS:
+        if (a["id"] in SEPARADOS) != separados:
+            continue
         ruta = os.path.join(carpeta, a["nombre"])
         if a["id"] in OPCIONALES and not os.path.isfile(ruta):
             continue
-        version_archivo = version_satelite if a["id"] == "satelite" and version_satelite else version
         archivos.append({
             **a,
             "url": f"https://github.com/{repo}/releases/download/{tag}/{a['nombre']}",
             "bytes": os.path.getsize(ruta),
             "sha256": sha256(ruta),
-            "version": version_archivo,
+            "version": versiones.get(a["id"]) or version,
         })
+    return archivos
+
+
+def construir(carpeta: str, version: str, tag: str, repo: str, version_satelite: str | None, ahora: str,
+              version_z17: str | None = None, separados: bool = False) -> dict:
+    """manifest.json (separados=False) o manifest-extra.json (separados=True)."""
+    versiones = {"satelite": version_satelite, "satelite-z17": version_z17}
+    archivos = _entradas(carpeta, version, tag, repo, versiones, separados)
     return {"esquema": ESQUEMA, "version": version, "generado": ahora, "archivos": archivos}
 
 
@@ -66,13 +84,19 @@ def main() -> int:
     p.add_argument("--tag", required=True)
     p.add_argument("--repo", required=True)
     p.add_argument("--version-satelite")
+    p.add_argument("--version-z17")
     args = p.parse_args()
     ahora = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    manifest = construir(args.carpeta, args.version, args.tag, args.repo, args.version_satelite, ahora)
-    with open(os.path.join(args.carpeta, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-    for a in manifest["archivos"]:
-        print(f"{a['nombre']}: {a['bytes'] / 1e6:.1f} MB · {a['sha256'][:12]} · {a['version']}")
+    manifest = construir(args.carpeta, args.version, args.tag, args.repo, args.version_satelite, ahora, args.version_z17)
+    extra = construir(args.carpeta, args.version, args.tag, args.repo, args.version_satelite, ahora, args.version_z17,
+                      separados=True)
+    for nombre, contenido in (("manifest.json", manifest), (NOMBRE_EXTRA, extra)):
+        if nombre == NOMBRE_EXTRA and not contenido["archivos"]:
+            continue
+        with open(os.path.join(args.carpeta, nombre), "w", encoding="utf-8") as f:
+            json.dump(contenido, f, ensure_ascii=False, indent=2)
+        for a in contenido["archivos"]:
+            print(f"{nombre}: {a['nombre']}: {a['bytes'] / 1e6:.1f} MB · {a['sha256'][:12]} · {a['version']}")
     return 0
 
 

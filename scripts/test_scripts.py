@@ -33,6 +33,32 @@ class TeselasTest(unittest.TestCase):
         self.assertEqual(len(lista), len(set(lista)))
         self.assertTrue(40_000 < len(lista) < 60_000, len(lista))
 
+    def test_solo_z17_son_teselas_de_z17_y_cuatro_veces_las_de_z16(self):
+        z16 = list(satelite.teselas(MALLORCA, 16, 16))
+        z17 = list(satelite.teselas(MALLORCA, 17, 17))
+        self.assertTrue(all(z == 17 for z, _, _ in z17))
+        self.assertEqual(len(z17), len(set(z17)))
+        self.assertTrue(3.8 * len(z16) < len(z17) < 4.3 * len(z16), (len(z16), len(z17)))
+        # Catedral de Palma: su tesela z17 es hija de la z16 conocida (16/33250/24913).
+        self.assertEqual(satelite.lon_a_x(2.6483, 17) // 2, 33250)
+        self.assertEqual(satelite.lat_a_y(39.5675, 17) // 2, 24913)
+        self.assertIn((17, satelite.lon_a_x(2.6483, 17), satelite.lat_a_y(39.5675, 17)), z17)
+
+    def test_abrir_anota_el_rango_de_zoom_y_la_tabla_de_mar(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            db = satelite.abrir(os.path.join(carpeta, "z17.mbtiles"), MALLORCA, 17, 17)
+            meta = dict(db.execute("SELECT name, value FROM metadata"))
+            tablas = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            db.close()
+            por_defecto = satelite.abrir(os.path.join(carpeta, "z16.mbtiles"), MALLORCA, 16)
+            meta16 = dict(por_defecto.execute("SELECT name, value FROM metadata"))
+            por_defecto.close()
+        self.assertEqual((meta["minzoom"], meta["maxzoom"]), ("17", "17"))
+        self.assertEqual(meta["center"].split(",")[2], "17")
+        self.assertEqual((meta16["minzoom"], meta16["maxzoom"]), ("0", "16"))
+        self.assertEqual(meta16["center"].split(",")[2], "10")
+        self.assertTrue({"tiles", "metadata", "sin_cobertura"} <= tablas)
+
     def test_es_jpeg(self):
         self.assertTrue(satelite.es_jpeg(b"\xff\xd8\xff\xe0resto"))
         self.assertFalse(satelite.es_jpeg(b"<html>"))
@@ -94,7 +120,8 @@ class ManifestTest(unittest.TestCase):
                 with open(os.path.join(carpeta, nombre), "wb") as f:
                     f.write(b"abc")
             con = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", None, "T")
-        self.assertEqual(manifest.OPCIONALES, {"valhalla", "busqueda", "relieve", "curvas", "vias-notas"})
+        self.assertEqual(
+            manifest.OPCIONALES, {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "satelite-z17"})
         self.assertTrue({"busqueda", "relieve", "curvas"}.isdisjoint({a["id"] for a in sin["archivos"]}))
         por_id = {a["id"]: a for a in con["archivos"]}
         self.assertEqual(por_id["busqueda"]["atribucion"], "© OpenStreetMap contributors")
@@ -105,6 +132,31 @@ class ManifestTest(unittest.TestCase):
             por_id["curvas"]["url"], "https://github.com/o/r/releases/download/datos-2026.10.28-1/curvas-mallorca.pmtiles")
         self.assertEqual(por_id["relieve"]["sha256"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 
+    def test_satelite_z17_va_solo_en_manifest_extra_y_nunca_en_manifest(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            for a in manifest.ARCHIVOS:
+                if a["id"] in manifest.OPCIONALES:
+                    continue
+                with open(os.path.join(carpeta, a["nombre"]), "wb") as f:
+                    f.write(b"abc")
+            sin = manifest.construir(carpeta, "v", "t", "o/r", None, "T", None, separados=True)
+            with open(os.path.join(carpeta, "pnoa-mallorca-z17.pmtiles"), "wb") as f:
+                f.write(b"abc")
+            principal = manifest.construir(carpeta, "2026.11.01-1", "datos-2026.11.01-1", "o/r", "2026.10.01-1", "T",
+                                           "2026.10.15-3")
+            extra = manifest.construir(carpeta, "2026.11.01-1", "datos-2026.11.01-1", "o/r", "2026.10.01-1", "T",
+                                       "2026.10.15-3", separados=True)
+        self.assertEqual(sin["archivos"], [])
+        self.assertNotIn("satelite-z17", {a["id"] for a in principal["archivos"]})
+        self.assertEqual([a["id"] for a in extra["archivos"]], ["satelite-z17"])
+        z17 = extra["archivos"][0]
+        self.assertEqual(z17["nombre"], "pnoa-mallorca-z17.pmtiles")
+        self.assertEqual(z17["version"], "2026.10.15-3")
+        self.assertEqual(z17["sha256"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        self.assertEqual(z17["licencia"], "CC-BY-4.0")
+        self.assertEqual(z17["url"], "https://github.com/o/r/releases/download/datos-2026.11.01-1/pnoa-mallorca-z17.pmtiles")
+        sat = next(a for a in principal["archivos"] if a["id"] == "satelite")
+        self.assertEqual(sat["version"], "2026.10.01-1")
 
     def test_vias_notas_es_opcional_con_su_atribucion(self):
         with tempfile.TemporaryDirectory() as carpeta:

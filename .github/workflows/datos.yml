@@ -1,13 +1,16 @@
 name: Datos Mallorca
 
 # Genera los datos offline de Mallorca (mapa vectorial, estilo, vias, indice de busqueda, relieve y curvas de nivel
-# del MDT05, teselas de enrutado Valhalla y, si toca, satelite PNOA) y los publica en una GitHub Release
+# del MDT05, teselas de enrutado Valhalla y, si toca, satelite PNOA z16 y z17) y los publica en una GitHub Release
 # `datos-<AAAA.MM.DD>-<run>`. La app lee releases/latest/download/manifest.json.
 #
-# Tres jobs para que el codigo de terceros (Maven/Planetiler, npm, pip) nunca vea un token con escritura:
-#   decidir  (contents: read)  -> version, etiqueta y si hay que regenerar el satelite. Solo usa `gh`, sin terceros.
-#   build    (contents: read)  -> genera todo en salida/ SIN GH_TOKEN y lo sube como artefacto.
-#   publicar (contents: write) -> unico job con GH_TOKEN de escritura: manifest, comprobaciones, release y retencion.
+# Cuatro jobs para que el codigo de terceros (Maven/Planetiler, npm, pip) nunca vea un token con escritura:
+#   decidir      (contents: read)  -> version, etiqueta y si hay que regenerar el satelite z16 y el z17. Solo `gh`.
+#   build        (contents: read)  -> genera todo en salida/ SIN GH_TOKEN y lo sube como artefacto.
+#   satelite_z17 (contents: read)  -> PNOA z17 (opcional, varias horas) en un job propio y en paralelo; reanudable.
+#   publicar     (contents: write) -> unico job con GH_TOKEN de escritura: manifest, comprobaciones, release y retencion.
+# El z17 (`pnoa-mallorca-z17.pmtiles`) NO va en manifest.json sino en manifest-extra.json: las apps ya instaladas
+# descargan todo lo que lista manifest.json y no ignoran ids desconocidos. Un fallo del z17 no bloquea la release.
 # La decision del satelite va en un job previo (y no en build con la API publica sin autenticar) porque la API anonima
 # tiene un limite de 60 peticiones/hora por IP, compartido con otros runners, y fallaria al azar.
 on:
@@ -16,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       satelite:
-        description: 'Regenerar el satelite PNOA (si no, se reutiliza el de la ultima release)'
+        description: 'Regenerar el satelite PNOA z16 y z17 (si no, se reutilizan los de la ultima release)'
         type: boolean
         default: false
 
@@ -56,6 +59,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
       regenerar: ${{ steps.sat.outputs.regenerar }}
+      regenerar_z17: ${{ steps.sat.outputs.regenerar_z17 }}
     steps:
       - name: Version y etiqueta
         id: v
@@ -76,15 +80,24 @@ jobs:
         run: |
           set -euo pipefail
           regenerar=true
+          regenerar_z17=true
           if [ "$SATELITE_INPUT" != "true" ]; then
             activos="$(gh release view --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
             if printf '%s\n' "$activos" | grep -qx 'pnoa-mallorca-z16.pmtiles' \
               && printf '%s\n' "$activos" | grep -qx 'manifest.json'; then
               regenerar=false
             fi
+            # El z17 se reutiliza si la ultima release lo trae junto con su manifest-extra.json.
+            if printf '%s\n' "$activos" | grep -qx 'pnoa-mallorca-z17.pmtiles' \
+              && printf '%s\n' "$activos" | grep -qx 'manifest-extra.json'; then
+              regenerar_z17=false
+            fi
           fi
-          echo "Regenerar satelite: $regenerar"
-          echo "regenerar=$regenerar" >> "$GITHUB_OUTPUT"
+          echo "Regenerar satelite z16: $regenerar; z17: $regenerar_z17"
+          {
+            echo "regenerar=$regenerar"
+            echo "regenerar_z17=$regenerar_z17"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Generar datos
@@ -249,9 +262,92 @@ jobs:
           retention-days: 3
           compression-level: 0
 
+  # Satelite z17 (~150 000 peticiones al IGN; la mitad, mar, no se guarda): job propio y sin token para no alargar
+  # `build`. El limite de un job de GitHub son 6 h: el paso de descarga corta a las 5 h 20 min y, si no termina,
+  # guarda lo bajado en la cache para que al relanzar el workflow continue donde se quedo.
+  satelite_z17:
+    name: Satelite PNOA z17
+    needs: decidir
+    if: needs.decidir.outputs.regenerar_z17 == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Herramienta pmtiles
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pmtiles-dl" "$RUNNER_TEMP/bin"
+          archivo="go-pmtiles_${PMTILES}_Linux_x86_64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/pmtiles-dl/$archivo" \
+            "https://github.com/protomaps/go-pmtiles/releases/download/v${PMTILES}/${archivo}"
+          (cd "$RUNNER_TEMP/pmtiles-dl" && echo "${PMTILES_SHA256}  ${archivo}" | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/pmtiles-dl/$archivo" -C "$RUNNER_TEMP/bin" pmtiles
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Tests de los scripts
+        run: python -I -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Cache del MBTiles parcial (reanudacion)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: trabajo/pnoa-z17.mbtiles
+          key: satelite-z17-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: satelite-z17-
+
+      - name: Descargar PNOA z17
+        id: descarga
+        timeout-minutes: 320
+        run: |
+          set -euo pipefail
+          mkdir -p trabajo
+          python -I scripts/satelite.py --bbox "$BBOX" --zmin 17 --zmax 17 --salida trabajo/pnoa-z17.mbtiles
+
+      # Solo si la descarga no termino (corte por tiempo o fallo): guarda el progreso para el siguiente intento.
+      - name: Guardar progreso en la cache
+        if: failure() && steps.descarga.outcome == 'failure'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: trabajo/pnoa-z17.mbtiles
+          key: satelite-z17-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Convertir a PMTiles
+        run: |
+          set -euo pipefail
+          mkdir -p salida-z17
+          pmtiles convert trabajo/pnoa-z17.mbtiles salida-z17/pnoa-mallorca-z17.pmtiles
+          pmtiles show salida-z17/pnoa-mallorca-z17.pmtiles
+          bytes="$(stat -c %s salida-z17/pnoa-mallorca-z17.pmtiles)"
+          echo "pnoa-mallorca-z17.pmtiles: $bytes bytes"
+          # Limite de GitHub: 2 GiB por asset.
+          if [ "$bytes" -ge 2147483648 ]; then
+            echo "::error::pnoa-mallorca-z17.pmtiles supera 2 GiB"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: satelite-z17
+          path: salida-z17/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
   publicar:
     name: Publicar release
-    needs: [decidir, build]
+    needs: [decidir, build, satelite_z17]
+    # El z17 es opcional: si su job falla o se salta, la release sale igualmente (con el z17 de la anterior si lo hay).
+    if: ${{ !cancelled() && needs.decidir.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -265,6 +361,8 @@ jobs:
       VERSION: ${{ needs.decidir.outputs.version }}
       TAG: ${{ needs.decidir.outputs.tag }}
       REGENERAR: ${{ needs.decidir.outputs.regenerar }}
+      REGENERAR_Z17: ${{ needs.decidir.outputs.regenerar_z17 }}
+      Z17_RESULT: ${{ needs.satelite_z17.result }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -297,11 +395,51 @@ jobs:
         if: env.REGENERAR == 'true'
         run: echo "VERSION_SAT=$VERSION" >> "$GITHUB_ENV"
 
+      - name: Satelite z17 - artefacto del job satelite_z17
+        if: needs.satelite_z17.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: satelite-z17
+          path: salida
+
+      - name: Satelite z17 - version regenerada
+        if: needs.satelite_z17.result == 'success'
+        run: echo "VERSION_Z17=$VERSION" >> "$GITHUB_ENV"
+
+      # Sin z17 nuevo (no tocaba regenerarlo, o su job fallo): se reutiliza el de la ultima release verificando su
+      # SHA-256 contra manifest-extra.json. Si tocaba regenerarlo y no hay previo, la release sale sin z17.
+      - name: Satelite z17 - reutilizar el de la ultima release
+        if: needs.satelite_z17.result != 'success'
+        run: |
+          set -euo pipefail
+          mkdir -p previo-z17
+          if ! gh release download --repo "$GITHUB_REPOSITORY" --dir previo-z17 --clobber \
+            --pattern 'pnoa-mallorca-z17.pmtiles' --pattern 'manifest-extra.json'; then
+            if [ "$REGENERAR_Z17" != "true" ]; then
+              echo "::error::La release previa deberia traer el satelite z17 y no se pudo descargar"
+              exit 1
+            fi
+            echo "::warning::Sin satelite z17 (job satelite_z17: $Z17_RESULT) y la release previa no lo tiene"
+            exit 0
+          fi
+          version_z17="$(jq -r '.archivos[] | select(.id == "satelite-z17") | .version // empty' previo-z17/manifest-extra.json)"
+          sha_z17="$(jq -r '.archivos[] | select(.id == "satelite-z17") | .sha256 // empty' previo-z17/manifest-extra.json)"
+          if [ -z "$version_z17" ] || ! printf '%s' "$sha_z17" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error::El manifest-extra previo no trae version y sha256 validos del satelite z17"
+            exit 1
+          fi
+          (cd previo-z17 && echo "${sha_z17}  pnoa-mallorca-z17.pmtiles" | sha256sum -c -)
+          mv previo-z17/pnoa-mallorca-z17.pmtiles salida/pnoa-mallorca-z17.pmtiles
+          echo "VERSION_Z17=$version_z17" >> "$GITHUB_ENV"
+          echo "Satelite z17 reutilizado (version $version_z17; job satelite_z17: $Z17_RESULT)"
+
       - name: Manifest y comprobaciones
         run: |
           set -euo pipefail
+          extra=()
+          if [ -n "${VERSION_Z17:-}" ]; then extra=(--version-z17 "$VERSION_Z17"); fi
           python3 -I scripts/manifest.py --carpeta salida --version "$VERSION" --tag "$TAG" \
-            --repo "$GITHUB_REPOSITORY" --version-satelite "$VERSION_SAT"
+            --repo "$GITHUB_REPOSITORY" --version-satelite "$VERSION_SAT" "${extra[@]}"
           # Limite de GitHub: 2 GiB por asset.
           for f in salida/*; do
             bytes="$(stat -c %s "$f")"
@@ -322,6 +460,10 @@ jobs:
             echo "Archivos:"
             jq -r '.archivos[] | "- `\(.nombre)`: \((.bytes / 1048576 | floor)) MiB (versión \(.version))"' salida/manifest.json
             echo '- `manifest.json`: índice con SHA-256 que lee la app.'
+            if [ -f salida/manifest-extra.json ]; then
+              jq -r '.archivos[] | "- `\(.nombre)`: \((.bytes / 1048576 | floor)) MiB (versión \(.version)); opcional, solo en `manifest-extra.json`"' salida/manifest-extra.json
+              echo '- `manifest-extra.json`: índice de los archivos opcionales que la app no baja por defecto (satélite z17).'
+            fi
             echo
             echo "Atribuciones: © OpenStreetMap contributors (ODbL 1.0); PNOA y MDT05 CC-BY 4.0 scne.es (IGN);"
             echo "Protomaps basemaps (BSD-3-Clause, CC0-1.0); fuentes Noto Sans (OFL-1.1)."

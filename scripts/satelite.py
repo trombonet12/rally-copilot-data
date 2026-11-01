@@ -1,9 +1,12 @@
-"""Descarga las teselas PNOA (IGN) de Mallorca z0–16 en un MBTiles, sin recomprimir.
+"""Descarga las teselas PNOA (IGN) de Mallorca entre --zmin y --zmax en un MBTiles, sin recomprimir.
 
 Uso: python -I scripts/satelite.py --bbox 2.30,39.26,3.50,39.97 --zmax 16 --salida pnoa.mbtiles
+     python -I scripts/satelite.py --bbox 2.30,39.26,3.50,39.97 --zmin 17 --zmax 17 --salida pnoa-z17.mbtiles
 
-Reanudable: las teselas que ya están en el MBTiles no se vuelven a pedir. Pocas peticiones simultáneas y
-User-Agent identificable, por cortesía con el servicio del IGN. Datos: PNOA CC-BY 4.0 scne.es.
+Reanudable: las teselas que ya están en el MBTiles no se vuelven a pedir, y las que el IGN devolvió sin cobertura
+(mar) quedan anotadas (solo sus coordenadas, en la tabla `sin_cobertura`, que no es parte del MBTiles) para no
+repetir esas peticiones. Pocas peticiones simultáneas y User-Agent identificable, por cortesía con el servicio
+del IGN. Datos: PNOA CC-BY 4.0 scne.es.
 """
 
 import argparse
@@ -71,22 +74,24 @@ def descargar(z: int, x: int, y: int) -> bytes | None:
     raise RuntimeError(f"tesela {z}/{x}/{y} falló tras {REINTENTOS} intentos")
 
 
-def abrir(ruta: str, bbox, zmax: int) -> sqlite3.Connection:
+def abrir(ruta: str, bbox, zmax: int, zmin: int = 0) -> sqlite3.Connection:
     db = sqlite3.connect(ruta)
     db.execute("CREATE TABLE IF NOT EXISTS metadata (name TEXT PRIMARY KEY, value TEXT)")
     db.execute(
         "CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, "
         "tile_data BLOB, PRIMARY KEY (zoom_level, tile_column, tile_row))"
     )
+    db.execute("CREATE TABLE IF NOT EXISTS sin_cobertura (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, "
+               "PRIMARY KEY (zoom_level, tile_column, tile_row))")
     oeste, sur, este, norte = bbox
     metadatos = {
         "name": "PNOA Mallorca",
         "format": "jpg",
         "type": "baselayer",
-        "minzoom": "0",
+        "minzoom": str(zmin),
         "maxzoom": str(zmax),
         "bounds": f"{oeste},{sur},{este},{norte}",
-        "center": f"{(oeste + este) / 2},{(sur + norte) / 2},10",
+        "center": f"{(oeste + este) / 2},{(sur + norte) / 2},{min(max(10, zmin), zmax)}",
         "attribution": ATRIBUCION,
     }
     db.executemany("INSERT OR REPLACE INTO metadata VALUES (?, ?)", metadatos.items())
@@ -97,15 +102,21 @@ def abrir(ruta: str, bbox, zmax: int) -> sqlite3.Connection:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--bbox", required=True, help="oeste,sur,este,norte")
+    p.add_argument("--zmin", type=int, default=0)
     p.add_argument("--zmax", type=int, default=16)
     p.add_argument("--salida", required=True)
     p.add_argument("--hilos", type=int, default=4)
     args = p.parse_args()
+    if not 0 <= args.zmin <= args.zmax:
+        p.error("--zmin debe estar entre 0 y --zmax")
     bbox = tuple(float(v) for v in args.bbox.split(","))
-    db = abrir(args.salida, bbox, args.zmax)
+    db = abrir(args.salida, bbox, args.zmax, args.zmin)
     hechas = set(db.execute("SELECT zoom_level, tile_column, tile_row FROM tiles"))
-    pendientes = [(z, x, y) for z, x, y in teselas(bbox, 0, args.zmax) if (z, x, fila_tms(z, y)) not in hechas]
-    print(f"teselas pendientes: {len(pendientes)} (ya descargadas: {len(hechas)})", flush=True)
+    hechas |= set(db.execute("SELECT zoom_level, tile_column, tile_row FROM sin_cobertura"))
+    pendientes = [
+        (z, x, y) for z, x, y in teselas(bbox, args.zmin, args.zmax) if (z, x, fila_tms(z, y)) not in hechas
+    ]
+    print(f"teselas pendientes: {len(pendientes)} (ya resueltas: {len(hechas)})", flush=True)
     vacias = 0
     with cf.ThreadPoolExecutor(max_workers=args.hilos) as pool:
         futuros = {pool.submit(descargar, *t): t for t in pendientes}
@@ -114,6 +125,7 @@ def main() -> int:
             datos = futuro.result()
             if datos is None:
                 vacias += 1
+                db.execute("INSERT OR REPLACE INTO sin_cobertura VALUES (?, ?, ?)", (z, x, fila_tms(z, y)))
             else:
                 db.execute("INSERT OR REPLACE INTO tiles VALUES (?, ?, ?, ?)", (z, x, fila_tms(z, y), datos))
             if i % 1000 == 0:

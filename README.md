@@ -13,15 +13,21 @@ release y solo baja los que han cambiado.
 | `estilo-mapa.zip` | Estilos MapLibre (`vectorial.json`, `satelite.json`), sprites y fuentes (glifos). Las rutas llevan el marcador `{{DIR}}`, que la app sustituye por su carpeta local | Protomaps basemaps, Noto Sans |
 | `vias-mallorca.tsv.gz` | Vías circulables con `maxspeed`, `oneway`, `ref` y `name` (formato `#vias-mallorca v1`) | OpenStreetMap |
 | `pnoa-mallorca-z16.pmtiles` | Ortofoto satélite z0–16 (JPEG sin recomprimir) | PNOA, IGN |
+| `pnoa-mallorca-z17.pmtiles` | Ortofoto satélite solo z17 (JPEG sin recomprimir; se superpone al z16 para más detalle). **Opcional y fuera de `manifest.json`**: va en `manifest-extra.json` (`id` `satelite-z17`) | PNOA, IGN |
 | `valhalla-mallorca.tar` | Teselas de enrutado de Valhalla 3.9.1 (tar de extracción con `index.bin`) para [valhalla-mobile](https://github.com/Rallista/valhalla-mobile) 0.6.4. Archivo opcional en el manifest (`id` `valhalla`) | OpenStreetMap vía Geofabrik |
 | `busqueda-mallorca.sqlite` | Índice de búsqueda: SQLite con la tabla `lugares` (lugares, calles y POIs con nombre; sin FTS5). Opcional (`id` `busqueda`) | OpenStreetMap |
 | `relieve-mallorca.pmtiles` | Relieve para sombreado (`raster-dem` Terrarium, teselas PNG de 512 px, z7–13, alturas a 0,25 m). Opcional (`id` `relieve`) | MDT05, IGN |
 | `curvas-mallorca.pmtiles` | Curvas de nivel cada 10 m (capa `curvas`, z11–14; atributos `ele` e `indice` = 1 cada 50 m). Opcional (`id` `curvas`) | MDT05, IGN |
 | `vias-notas-mallorca.tsv.gz` | Etiquetas de vías y nodos de OSM y perfil de altura (5 m) de cada vía, para las notas de rally (formato `#vias-notas v1`, ver abajo). Opcional (`id` `vias-notas`) | OpenStreetMap, MDT05 (IGN) |
 | `manifest.json` | Índice: versión, tamaño, SHA-256, URL y atribución de cada archivo | Generado |
+| `manifest-extra.json` | Mismo formato que `manifest.json`, solo con los archivos opcionales que las apps ya instaladas no deben bajar (hoy `satelite-z17`). Se omite si no hay ninguno | Generado |
 
-Cada archivo del manifest lleva su propia `version`. El satélite cambia rara vez: se reutiliza el de la release
-anterior y conserva su versión.
+Cada archivo del manifest lleva su propia `version`. El satélite (z16 y z17) cambia rara vez: se reutiliza el de la release
+anterior, verificando su SHA-256, y conserva su versión.
+
+El z17 está en `manifest-extra.json` y no en `manifest.json` porque las apps instaladas descargan **todos** los ids que
+lista `manifest.json` (no ignoran los desconocidos) y su límite de espacio es de 2 GB. Para pasarlo a `manifest.json`
+hay que vaciar `SEPARADOS` en `scripts/manifest.py`, cuando ya no queden apps antiguas.
 
 Área: bbox `2.30,39.26,3.50,39.97` (oeste, sur, este, norte).
 
@@ -125,9 +131,13 @@ La app lee ese manifest y descarga las `url` de los archivos cuyo SHA-256 no coi
 
 ## Cómo se lanza
 
-- **Automático**: el día 1 de cada mes a las 03:00 UTC. Reutiliza el satélite de la última release.
+- **Automático**: el día 1 de cada mes a las 03:00 UTC. Reutiliza el satélite (z16 y z17) de la última release.
 - **Manual**: pestaña *Actions* → *Datos Mallorca* → *Run workflow*. La casilla `satelite` fuerza a descargar de nuevo
-  las teselas PNOA (lento: decenas de miles de peticiones al IGN) y se activa sola si todavía no hay release con satélite.
+  las teselas PNOA z16 y z17 (lento: decenas de miles de peticiones al IGN) y se activa sola, para cada una, si la última
+  release no la trae. Para generar el z17 por primera vez basta lanzarlo con la casilla sin marcar: el z16 se reutiliza.
+- El z17 se genera en el job propio `satelite_z17` (~4–5 h estimadas, en paralelo a `build`; límite de 6 h por job). Si el
+  paso de descarga no termina guarda el progreso en la caché de Actions (`satelite-z17-*`) y al relanzar el workflow
+  continúa. Un fallo del z17 no impide publicar la release: se reutiliza el z17 anterior o sale sin él.
 - Conserva las 3 últimas releases `datos-*`; las anteriores se borran junto con su etiqueta.
 - GitHub desactiva los workflows programados tras 60 días sin actividad en el repo: si pasa, se reactiva a mano desde
   *Actions*.
@@ -139,10 +149,11 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 
 ## Seguridad del workflow
 
-- Tres jobs: `decidir` y `build` solo tienen `contents: read`; el código de terceros (Maven/Planetiler, npm, pip) se
-  ejecuta en `build`, sin `GH_TOKEN`. Solo `publicar` tiene `contents: write`: descarga el artefacto, genera el
+- Cuatro jobs: `decidir`, `build` y `satelite_z17` solo tienen `contents: read`; el código de terceros (Maven/Planetiler,
+  npm, pip) se ejecuta en `build`, sin `GH_TOKEN`. Solo `publicar` tiene `contents: write`: descarga el artefacto, genera el
   manifest, crea la release y aplica la retención.
-- El satélite reutilizado de la release anterior se verifica contra el SHA-256 de su `manifest.json` antes de usarlo.
+- El satélite reutilizado de la release anterior se verifica contra el SHA-256 de su `manifest.json` (z16) o
+  `manifest-extra.json` (z17) antes de usarlo.
 - **Riesgos conocidos sin mitigar**: `osmium` de PyPI se fija por versión pero no por hash, y Planetiler descarga con
   `--download` fuentes auxiliares (p. ej. Natural Earth, datos de agua) sin comprobar su hash.
 
@@ -152,10 +163,10 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 - `scripts/vias_notas.py`: etiquetas de OSM y perfil de altura de las vías (`vias-notas-mallorca.tsv.gz`).
 - `scripts/busqueda.py`: genera el índice de búsqueda SQLite (`busqueda-mallorca.sqlite`).
 - `scripts/relieve.sh`: MDT05 por WCS -> `relieve-mallorca.pmtiles` y `curvas-mallorca.pmtiles` (GDAL, tippecanoe).
-- `scripts/satelite.py`: descarga las teselas PNOA a un MBTiles (reanudable).
+- `scripts/satelite.py`: descarga las teselas PNOA entre `--zmin` (0 por defecto) y `--zmax` a un MBTiles (reanudable; anota las teselas de mar en la tabla `sin_cobertura` para no repetirlas).
 - `scripts/estilo.mjs`: genera estilos (con relieve, curvas y placas), sprites y fuentes (dependencia npm en `estilo/`).
 - `scripts/valhalla.sh`: genera `valhalla-mallorca.tar` con la imagen Docker oficial de Valhalla.
-- `scripts/manifest.py`: escribe `manifest.json` (los archivos opcionales ausentes se omiten).
+- `scripts/manifest.py`: escribe `manifest.json` y, si hay archivos separados (z17), `manifest-extra.json` (los opcionales ausentes se omiten).
 - `scripts/test_scripts.py`: pruebas sin red (`python -I -m unittest discover -s scripts -p 'test_*.py'`).
 
 ## Atribuciones y licencias
