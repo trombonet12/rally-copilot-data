@@ -1,7 +1,7 @@
 # Rally Copilot · datos de Mallorca
 
 Datos offline de **Mallorca** para la app [Rally Copilot](https://github.com/trombonet12/Rally-Copilot): mapa
-vectorial, estilo, vías con límite de velocidad, mapa satélite, índice de búsqueda, relieve y curvas de nivel. Un workflow de GitHub Actions los regenera cada mes
+vectorial, estilo, vías con límite de velocidad, mapa satélite, índice de búsqueda, relieve, curvas de nivel y radares. Un workflow de GitHub Actions los regenera cada mes
 y los publica en una GitHub Release (`datos-AAAA.MM.DD-N`). No hay servidor: la app descarga los archivos de la
 release y solo baja los que han cambiado.
 
@@ -19,6 +19,7 @@ release y solo baja los que han cambiado.
 | `relieve-mallorca.pmtiles` | Relieve para sombreado (`raster-dem` Terrarium, teselas PNG de 512 px, z7–13, alturas a 0,25 m). Opcional (`id` `relieve`) | MDT05, IGN |
 | `curvas-mallorca.pmtiles` | Curvas de nivel cada 10 m (capa `curvas`, z11–14; atributos `ele` e `indice` = 1 cada 50 m). Opcional (`id` `curvas`) | MDT05, IGN |
 | `vias-notas-mallorca.tsv.gz` | Etiquetas de vías y nodos de OSM y perfil de altura (5 m) de cada vía, para las notas de rally (formato `#vias-notas v1`, ver abajo). Opcional (`id` `vias-notas`) | OpenStreetMap, MDT05 (IGN) |
+| `radares-mallorca.tsv` | Radares fijos, de tramo y zonas de radar móvil (formato `#radares v1`, ver abajo; pocos KB). Opcional (`id` `radares`) y **en `manifest.json`**, no en el extra | DGT (NAP), OpenStreetMap, informe de cinemómetros de la DGT |
 | `manifest.json` | Índice: versión, tamaño, SHA-256, URL y atribución de cada archivo | Generado |
 | `manifest-extra.json` | Mismo formato que `manifest.json`, solo con los archivos opcionales que las apps ya instaladas no deben bajar (hoy `satelite-z17`). Se omite si no hay ninguno | Generado |
 
@@ -107,6 +108,50 @@ hay que vaciar `SEPARADOS` en `scripts/manifest.py`, cuando ya no queden apps an
   (el MDT es terreno desnudo). Mar, sin dato o fuera del MDT: 0.
 - Atribución: «© OpenStreetMap contributors; MDT05 CC-BY 4.0 scne.es» (ODbL-1.0, CC-BY-4.0).
 
+### Radares (`radares-mallorca.tsv`)
+
+- `scripts/radares.py` lo genera en el job `build` (sin token) justo después de recortar el PBF, con pyosmium para OSM y la
+  librería estándar para el XML de la DGT. Falla (y con él el job) si salen **menos de 5 radares fijos**, si algún radar queda
+  **fuera del bbox**, si hay ids repetidos o un tramo sin su pareja inicio/fin. Si solo falla la descarga del XML de la DGT,
+  sale el TSV con OSM y un aviso.
+- Fuentes:
+  - **DGT**: XML DATEX II v1 de radares del NAP (`PredefinedLocationsPublication/radares/content.xml`), filtrado al bbox.
+    Sus cabinas son `FIJO`; las que el informe de cinemómetros da como radar móvil en ese PK pasan a `ZONA_MOVIL` (ver abajo).
+    Los tramos de velocidad media (`CinemometrosVelocidadMedia`, de `from` a `to`) serían `TRAMO_*`; el feed actual no trae
+    ninguno en Mallorca. El XML no da límite ni sentido.
+  - **OSM**: nodos `highway=speed_camera` (`maxspeed`, `direction`) y relaciones `type=enforcement`: `enforcement=maxspeed`
+    (`device`, `from`, `to`) da los fijos y `enforcement=average_speed` los tramos (de `from` a `to`, o de un dispositivo al
+    otro si faltan). El rumbo es `direction` o, si falta, el de `from` a `to`; un dispositivo con dos relaciones (una por
+    sentido) da dos filas.
+  - **Informe de cinemómetros de la DGT** (PDF, 2025-03-21), curado en `datos/cinemometros-mallorca.tsv` (filas de Baleares
+    con carretera `Ma-*`; carretera, tipo, PK, sentido, fecha y fuente). No se lee el PDF en CI (la URL lleva fecha). Solo se usa
+    para clasificar las cabinas del XML por PK exacto (el PDF y el XML no siempre coinciden en el nombre de la carretera).
+    Los **rangos de PK** (`Ma-12 0.080 - 111.100`...) no se convierten en coordenadas: ni el PDF ni el XML dan el origen de
+    los PK de cada carretera, así que hoy no salen como zonas.
+- Fusión: un punto de la DGT absorbe los `FIJO` de OSM a menos de 100 m con rumbo compatible (las coordenadas de la DGT
+  quedan a 8-94 m de la cámara de OSM) y conserva su posición, su tipo y su límite si lo tuviera; entre los `FIJO` restantes,
+  los de menos de 50 m con rumbo compatible (menos de 90° de diferencia, o alguno sin rumbo) son uno. Los tramos no se fusionan.
+- Formato `#radares v1`: UTF-8, campos separados por tabulador; línea 1 `#radares v1`, línea 2 los nombres de columna con
+  `#`, y una fila por radar:
+
+  ```
+  tipo  id  lat  lon  rumbo  limite_kmh  tramo_id  fuente        (ejemplo, columnas alineadas solo para leerlas)
+  FIJO          osm-n992002040      39.536760  2.728520  100  120            OSM
+  FIJO          dgt-120643          39.634300  2.748535  215  120            DGT
+  TRAMO_INICIO  osm-r20233503-ini   39.486943  2.746213  43   90   osm-r20233503  OSM
+  TRAMO_FIN     osm-r20233503-fin   39.493085  2.753659  43   90   osm-r20233503  OSM
+  ZONA_MOVIL    dgt-120651          39.456660  2.946660  270  80   dgt-120651     DGT-PDF
+  ```
+  - `tipo`: `FIJO`, `TRAMO_INICIO`, `TRAMO_FIN` o `ZONA_MOVIL`. `lat`/`lon`: grados decimales con 6 decimales.
+  - `rumbo`: grados 0-359 hacia donde circulan los vehículos vigilados; **vacío = ambos sentidos o desconocido**. En OSM
+    `direction` coincide con el sentido de la circulación (comprobado con las relaciones de Mallorca).
+  - `limite_kmh`: entero o vacío. `fuente`: `DGT`, `OSM` o `DGT-PDF` (cabina que el informe de la DGT da como móvil).
+  - `tramo_id`: vacío en `FIJO`. `TRAMO_INICIO` y `TRAMO_FIN` del mismo tramo comparten `tramo_id` y van en filas consecutivas
+    (inicio antes que fin); `rumbo` y `limite_kmh` se repiten en las dos. Cada sentido de un tramo es otro tramo.
+  - `ZONA_MOVIL`: **polilínea en filas consecutivas** con el mismo `tramo_id`, en orden de recorrido; una zona de un solo
+    punto (todas las de hoy: las cabinas) es una fila con `tramo_id` = `id`. Es una zona probable, no un radar confirmado.
+  - `id` es único por fila.
+
 ### Placas de carretera
 
 `estilo.mjs` sustituye la capa `roads_shields` de Protomaps (solo pinta rutas con `network`) por tres capas de símbolo con la
@@ -160,6 +205,7 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 ## Scripts
 
 - `scripts/vias.py`: extrae las vías del PBF a TSV comprimido.
+- `scripts/radares.py`: radares fijos, de tramo y zonas móviles (DGT + OSM) a `radares-mallorca.tsv`; `datos/cinemometros-mallorca.tsv` es el extracto curado del informe de la DGT y `scripts/fixtures/` un recorte real del XML para las pruebas.
 - `scripts/vias_notas.py`: etiquetas de OSM y perfil de altura de las vías (`vias-notas-mallorca.tsv.gz`).
 - `scripts/busqueda.py`: genera el índice de búsqueda SQLite (`busqueda-mallorca.sqlite`).
 - `scripts/relieve.sh`: MDT05 por WCS -> `relieve-mallorca.pmtiles` y `curvas-mallorca.pmtiles` (GDAL, tippecanoe).
@@ -173,6 +219,8 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 
 - Mapa, vías, índice de búsqueda y teselas de enrutado: © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), licencia ODbL 1.0.
 - Satélite: PNOA, © Instituto Geográfico Nacional de España, CC-BY 4.0 scne.es.
+- Radares: DGT, [NAP](https://nap.dgt.es) (CC BY, según la ficha del dataset; **VERIFICAR** las condiciones de reutilización con nap@dgt.es) e
+  informe de cinemómetros de la DGT; cámaras y relaciones `enforcement` de © OpenStreetMap contributors, licencia ODbL 1.0.
 - Relieve y curvas de nivel: MDT05, © Instituto Geográfico Nacional de España, CC-BY 4.0 scne.es.
 - Índice de búsqueda: © OpenStreetMap contributors, licencia ODbL 1.0.
 - Estilos y esquema de teselas: [Protomaps basemaps](https://github.com/protomaps/basemaps) (BSD-3-Clause) y

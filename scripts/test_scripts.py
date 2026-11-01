@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import busqueda  # noqa: E402
 import manifest  # noqa: E402
+import radares  # noqa: E402
 import satelite  # noqa: E402
 import vias_notas  # noqa: E402
 
@@ -121,7 +122,8 @@ class ManifestTest(unittest.TestCase):
                     f.write(b"abc")
             con = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", None, "T")
         self.assertEqual(
-            manifest.OPCIONALES, {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "satelite-z17"})
+            manifest.OPCIONALES,
+            {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "satelite-z17"})
         self.assertTrue({"busqueda", "relieve", "curvas"}.isdisjoint({a["id"] for a in sin["archivos"]}))
         por_id = {a["id"]: a for a in con["archivos"]}
         self.assertEqual(por_id["busqueda"]["atribucion"], "© OpenStreetMap contributors")
@@ -157,6 +159,27 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(z17["url"], "https://github.com/o/r/releases/download/datos-2026.11.01-1/pnoa-mallorca-z17.pmtiles")
         sat = next(a for a in principal["archivos"] if a["id"] == "satelite")
         self.assertEqual(sat["version"], "2026.10.01-1")
+
+    def test_radares_va_en_manifest_json_como_opcional_con_su_atribucion(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            for a in manifest.ARCHIVOS:
+                if a["id"] in manifest.OPCIONALES:
+                    continue
+                with open(os.path.join(carpeta, a["nombre"]), "wb") as f:
+                    f.write(b"abc")
+            sin = manifest.construir(carpeta, "v", "t", "o/r", None, "T")
+            with open(os.path.join(carpeta, "radares-mallorca.tsv"), "wb") as f:
+                f.write(b"abc")
+            con = manifest.construir(carpeta, "v", "t", "o/r", None, "T")
+            extra = manifest.construir(carpeta, "v", "t", "o/r", None, "T", None, separados=True)
+        self.assertNotIn("radares", {a["id"] for a in sin["archivos"]})
+        self.assertNotIn("radares", manifest.SEPARADOS)
+        self.assertEqual(extra["archivos"], [])
+        r = next(a for a in con["archivos"] if a["id"] == "radares")
+        self.assertEqual(r["nombre"], "radares-mallorca.tsv")
+        self.assertEqual(r["licencia"], "CC-BY, ODbL-1.0")
+        self.assertIn("DGT", r["atribucion"])
+        self.assertIn("OpenStreetMap", r["atribucion"])
 
     def test_vias_notas_es_opcional_con_su_atribucion(self):
         with tempfile.TemporaryDirectory() as carpeta:
@@ -505,3 +528,256 @@ class SqliteBusquedaTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+DGT_RECORTE = os.path.join(FIXTURES, "dgt-radares-recorte.xml")  # extracto real del XML de la DGT (2025-12-18)
+CINEMOMETROS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "datos", "cinemometros-mallorca.tsv")
+ZARAGOZA = (-1.0, 41.0, -0.5, 42.0)
+
+
+def punto(ident, lat, lon, rumbo=None, limite=None, tipo=radares.FIJO, fuente="OSM", tramo=""):
+    return radares.radar(tipo, ident, lat, lon, fuente, rumbo, limite, tramo)
+
+
+class RadaresDgtTest(unittest.TestCase):
+    def test_lee_las_cabinas_de_mallorca_y_descarta_las_de_fuera_del_bbox(self):
+        cabinas, tramos = radares.leer_dgt(DGT_RECORTE)
+        self.assertEqual([c["id"] for c in cabinas], ["120451", "120645", "120646"])  # 120001 es de Zaragoza
+        self.assertEqual(tramos, [])
+        c = cabinas[0]
+        self.assertEqual((c["lat"], c["lon"], c["carretera"], c["pk_m"]), (39.522423, 2.5087774, "Ma-1", 15500))
+
+    def test_lee_un_tramo_de_velocidad_media_con_from_como_inicio_y_to_como_fin(self):
+        cabinas, tramos = radares.leer_dgt(DGT_RECORTE, ZARAGOZA)
+        self.assertEqual(cabinas, [])  # la cabina 120001 (A-2) queda fuera de ese recuadro
+        self.assertEqual(tramos, [{"id": "161274", "ini": (41.6088, -0.915697), "fin": (41.6192, -0.9496)}])
+        filas = radares.radares_dgt([], tramos)
+        self.assertEqual([(f["tipo"], f["id"], f["tramo"]) for f in filas],
+                         [(radares.TRAMO_INICIO, "dgt-cvm-161274-ini", "dgt-cvm-161274"),
+                          (radares.TRAMO_FIN, "dgt-cvm-161274-fin", "dgt-cvm-161274")])
+        self.assertEqual(filas[0]["lat"], 41.6088)
+        self.assertEqual(filas[1]["lat"], 41.6192)
+
+    def test_cinemometros_curados_distinguen_las_cabinas_moviles(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = os.path.join(carpeta, "c.tsv")
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write("#cinemometros-mallorca v1\n#carretera\ttipo\tpk_ini\tpk_fin\tsentido\tfecha_informe\tfuente\n"
+                        "Ma-11\tMOVIL\t15.5\t\tAMBOS\t2025-03-21\tDGT-PDF\n"
+                        "Ma-12\tFIJO\t15.92\t\tDECRECIENTE\t2025-03-21\tDGT-PDF\n"
+                        "Ma-12\tMOVIL\t0.080\t111.100\tAMBOS\t2025-03-21\tDGT-PDF\n"
+                        "Ma-1015\tMOVIL\t\t\tAMBOS\t2025-03-21\tDGT-PDF\n")
+            cin = radares.leer_cinemometros(ruta)
+        self.assertEqual(cin, {"fijos": {15920}, "moviles": {15500}})
+        cabinas, _ = radares.leer_dgt(DGT_RECORTE)
+        filas = {f["id"]: f for f in radares.radares_dgt(cabinas, [], cin)}
+        self.assertEqual(filas["dgt-120451"]["tipo"], radares.ZONA_MOVIL)  # PK 15 500 = móvil
+        self.assertEqual(filas["dgt-120451"]["fuente"], "DGT-PDF")
+        self.assertEqual(filas["dgt-120451"]["tramo"], "dgt-120451")
+        self.assertEqual(filas["dgt-120645"]["tipo"], radares.FIJO)  # PK 15 920 = fijo
+        self.assertEqual(filas["dgt-120646"]["tipo"], radares.FIJO)  # sin dato en el PDF: cabina, fijo por defecto
+        self.assertEqual(filas["dgt-120645"]["fuente"], "DGT")
+
+    def test_el_tsv_curado_del_repo_es_valido(self):
+        cin = radares.leer_cinemometros(CINEMOMETROS)
+        self.assertIn(15500, cin["moviles"])
+        self.assertIn(15920, cin["fijos"])
+        self.assertTrue(cin["moviles"].isdisjoint(cin["fijos"]))
+
+
+class RadaresOsmTest(unittest.TestCase):
+    def test_parsea_limite_y_direccion(self):
+        self.assertEqual(radares.parsear_limite("90"), 90)
+        self.assertIsNone(radares.parsear_limite("50 mph"))
+        self.assertIsNone(radares.parsear_limite("none"))
+        self.assertIsNone(radares.parsear_limite(None))
+        self.assertEqual(radares.parsear_direccion("75"), 75)
+        self.assertEqual(radares.parsear_direccion("260.4"), 260)
+        self.assertEqual(radares.parsear_direccion("360"), 0)
+        self.assertEqual(radares.parsear_direccion("SW"), 225)
+        self.assertEqual(radares.parsear_direccion("30;255"), 30)
+        self.assertIsNone(radares.parsear_direccion("forward"))
+        self.assertIsNone(radares.parsear_direccion("400"))
+        self.assertIsNone(radares.parsear_direccion(None))
+
+    def test_rumbo_entre_puntos(self):
+        self.assertEqual(radares.rumbo_entre((39.5, 2.5), (39.6, 2.5)), 0)
+        self.assertEqual(radares.rumbo_entre((39.5, 2.5), (39.5, 2.6)), 90)
+        self.assertEqual(radares.rumbo_entre((39.5, 2.5), (39.4, 2.5)), 180)
+        self.assertEqual(radares.rumbo_entre((39.5, 2.5), (39.5, 2.4)), 270)
+
+    def _sintetico(self):
+        # Una camara suelta con direction, otra con maxspeed ilegible, un dispositivo de una relacion `maxspeed` con
+        # from/to, un dispositivo que vigila los dos sentidos (dos relaciones) y un tramo de velocidad media.
+        camaras = {
+            1: {"lat": 39.60, "lon": 2.60, "tags": {"maxspeed": "90", "direction": "75"}},
+            2: {"lat": 39.61, "lon": 2.61, "tags": {"maxspeed": "mph"}},
+            3: {"lat": 39.62, "lon": 2.62, "tags": {"maxspeed": "50"}},
+            4: {"lat": 39.63, "lon": 2.63, "tags": {}},
+            5: {"lat": 39.64, "lon": 2.64, "tags": {"maxspeed": "80"}},
+            6: {"lat": 39.65, "lon": 2.65, "tags": {"maxspeed": "80"}},
+        }
+        ubic_nodos = {k: (v["lat"], v["lon"]) for k, v in camaras.items()}
+        ubic_nodos.update({10: (39.62, 2.617), 11: (39.62, 2.623),  # relacion del 3: de oeste a este
+                           12: (39.63, 2.627), 13: (39.63, 2.629), 14: (39.63, 2.633), 15: (39.63, 2.631),  # del 4
+                           20: (39.64, 2.64), 21: (39.65, 2.65)})
+        relaciones = [
+            {"id": 100, "tags": {"enforcement": "maxspeed", "maxspeed": "60"},
+             "miembros": [("n", 3, "device"), ("n", 10, "from"), ("n", 11, "to")]},
+            {"id": 101, "tags": {"enforcement": "maxspeed", "maxspeed": "70"},
+             "miembros": [("n", 4, "device"), ("n", 12, "from"), ("n", 13, "to")]},
+            {"id": 102, "tags": {"enforcement": "maxspeed", "maxspeed": "70"},
+             "miembros": [("n", 4, "device"), ("n", 14, "from"), ("n", 15, "to")]},
+            {"id": 103, "tags": {"enforcement": "average_speed", "maxspeed": "85"},
+             "miembros": [("n", 5, "device"), ("n", 6, "device"), ("n", 20, "from"), ("n", 21, "to")]},
+            {"id": 104, "tags": {"enforcement": "traffic_signals"},
+             "miembros": [("n", 1, "device"), ("n", 10, "from")]},
+            {"id": 105, "tags": {"enforcement": "maxspeed", "maxspeed": "50"}, "miembros": [("n", 10, "from")]},
+        ]
+        return camaras, relaciones, ubic_nodos, {}
+
+    def test_construye_fijos_tramos_y_dispositivos_de_dos_sentidos(self):
+        filas = {f["id"]: f for f in radares.radares_osm(*self._sintetico())}
+        self.assertEqual(sorted(filas), ["osm-n1", "osm-n2", "osm-n3", "osm-n4-r101", "osm-n4-r102",
+                                         "osm-r103-fin", "osm-r103-ini"])
+        # camara suelta: direction y maxspeed de sus etiquetas
+        self.assertEqual((filas["osm-n1"]["rumbo"], filas["osm-n1"]["limite"]), (75, 90))
+        # maxspeed ilegible y sin relacion: sin limite ni rumbo (ambos sentidos)
+        self.assertEqual((filas["osm-n2"]["rumbo"], filas["osm-n2"]["limite"]), (None, None))
+        # una sola relacion: sin direction se usa el rumbo from -> to (este = 90); el limite del nodo gana al de la relacion
+        self.assertEqual((filas["osm-n3"]["rumbo"], filas["osm-n3"]["limite"]), (90, 50))
+        # dos relaciones: una fila por sentido, con el rumbo y el limite de cada relacion
+        self.assertEqual((filas["osm-n4-r101"]["rumbo"], filas["osm-n4-r101"]["limite"]), (90, 70))
+        self.assertEqual((filas["osm-n4-r102"]["rumbo"], filas["osm-n4-r102"]["limite"]), (270, 70))
+        # los dispositivos 5 y 6 son del tramo y no salen como FIJO
+        self.assertNotIn("osm-n5", filas)
+        ini, fin = filas["osm-r103-ini"], filas["osm-r103-fin"]
+        self.assertEqual((ini["tipo"], fin["tipo"]), (radares.TRAMO_INICIO, radares.TRAMO_FIN))
+        self.assertEqual((ini["tramo"], fin["tramo"]), ("osm-r103", "osm-r103"))
+        self.assertEqual((ini["lat"], ini["lon"]), (39.64, 2.64))
+        self.assertEqual((fin["lat"], fin["lon"]), (39.65, 2.65))
+        self.assertEqual((ini["limite"], ini["rumbo"], fin["rumbo"]), (85, 38, 38))
+
+    def test_tramo_sin_from_ni_to_usa_el_primer_y_el_ultimo_dispositivo(self):
+        camaras, _, ubic_nodos, _ = self._sintetico()
+        rel = [{"id": 7, "tags": {"enforcement": "average_speed"},
+                "miembros": [("n", 5, "device"), ("n", 6, "device")]}]
+        filas = radares.radares_osm(camaras, rel, ubic_nodos, {})
+        tramo = [f for f in filas if f["tramo"]]
+        self.assertEqual([(f["tipo"], f["lat"]) for f in tramo],
+                         [(radares.TRAMO_INICIO, 39.64), (radares.TRAMO_FIN, 39.65)])
+        self.assertEqual({f["limite"] for f in tramo}, {80})  # sin maxspeed en la relacion: el de los dispositivos
+
+    def test_from_y_to_pueden_ser_vias(self):
+        camaras = {1: {"lat": 39.6, "lon": 2.6, "tags": {}}}
+        ubic_nodos = {1: (39.6, 2.6)}
+        ubic_vias = {50: (39.60, 2.600), 51: (39.60, 2.610)}
+        rel = [{"id": 8, "tags": {"enforcement": "average_speed", "maxspeed": "70"},
+                "miembros": [("n", 1, "device"), ("w", 50, "from"), ("w", 51, "to")]}]
+        filas = radares.radares_osm(camaras, rel, ubic_nodos, ubic_vias)
+        self.assertEqual([(f["tipo"], f["rumbo"]) for f in filas],
+                         [(radares.TRAMO_INICIO, 90), (radares.TRAMO_FIN, 90)])
+
+
+class RadaresFusionTest(unittest.TestCase):
+    def test_la_dgt_absorbe_el_fijo_de_osm_cercano_y_conserva_su_limite(self):
+        dgt = [punto("dgt-1", 39.5000, 2.5000, limite=100, fuente="DGT")]
+        osm = [punto("osm-n1", 39.5004, 2.5000, rumbo=120, limite=90)]  # a 44 m
+        salida = radares.fusionar(dgt, osm)
+        self.assertEqual(len(salida), 1)
+        f = salida[0]
+        self.assertEqual((f["id"], f["fuente"], f["lat"], f["rumbo"], f["limite"]), ("dgt-1", "DGT", 39.5, 120, 100))
+
+    def test_la_dgt_sin_limite_toma_el_de_osm_y_la_zona_movil_absorbe_el_fijo(self):
+        dgt = [punto("dgt-2", 39.5000, 2.5000, tipo=radares.ZONA_MOVIL, fuente="DGT-PDF", tramo="dgt-2")]
+        osm = [punto("osm-n2", 39.5007, 2.5000, rumbo=200, limite=80)]  # a 78 m: dentro de 100 m
+        salida = radares.fusionar(dgt, osm)
+        self.assertEqual([(f["tipo"], f["id"], f["tramo"], f["rumbo"], f["limite"]) for f in salida],
+                         [(radares.ZONA_MOVIL, "dgt-2", "dgt-2", 200, 80)])
+
+    def test_dos_osm_de_sentidos_opuestos_en_la_misma_cabina_dan_dos_filas(self):
+        dgt = [punto("dgt-3", 39.5, 2.5, fuente="DGT")]
+        osm = [punto("osm-a", 39.5, 2.5001, rumbo=90, limite=50), punto("osm-b", 39.5, 2.5001, rumbo=270, limite=50)]
+        salida = radares.fusionar(dgt, osm)
+        self.assertEqual([(f["id"], f["rumbo"]) for f in salida], [("dgt-3", 90), ("dgt-3-2", 270)])
+
+    def test_osm_lejano_o_de_tramo_no_se_fusiona_y_los_tramos_pasan_intactos(self):
+        dgt = [punto("dgt-4", 39.5, 2.5, fuente="DGT")]
+        osm = [punto("osm-lejos", 39.5, 2.502, rumbo=10, limite=60),  # a 170 m
+               punto("osm-t-ini", 39.5, 2.5, tipo=radares.TRAMO_INICIO, tramo="t"),
+               punto("osm-t-fin", 39.51, 2.5, tipo=radares.TRAMO_FIN, tramo="t")]
+        salida = radares.fusionar(dgt, osm)
+        self.assertEqual(sorted(f["id"] for f in salida), ["dgt-4", "osm-lejos", "osm-t-fin", "osm-t-ini"])
+
+    def test_dedup_de_fijos_de_osm_a_menos_de_50_m_solo_si_el_rumbo_es_compatible(self):
+        osm = [punto("a", 39.5, 2.5, rumbo=90), punto("b", 39.5, 2.5002, rumbo=100),  # 17 m, 10 grados -> uno
+               punto("c", 39.5, 2.5, rumbo=270),  # mismo sitio, sentido contrario -> otro
+               punto("d", 39.5, 2.5, rumbo=None),  # sin rumbo: compatible con el primero
+               punto("e", 39.5, 2.51, rumbo=90)]  # a 850 m
+        salida = radares.fusionar([], osm)
+        self.assertEqual([f["id"] for f in salida], ["a", "c", "e"])
+
+
+class RadaresValidacionYFormatoTest(unittest.TestCase):
+    def _fijos(self, n):
+        return [punto(f"f{i}", 39.5 + i * 0.01, 2.6) for i in range(n)]
+
+    def test_valido_con_cinco_fijos_dentro_del_bbox(self):
+        self.assertEqual(radares.validar(self._fijos(5)), [])
+
+    def test_falla_con_menos_de_cinco_fijos(self):
+        errores = radares.validar(self._fijos(4))
+        self.assertEqual(len(errores), 1)
+        self.assertIn("solo 4 radares fijos", errores[0])
+
+    def test_los_tramos_y_las_zonas_no_cuentan_como_fijos(self):
+        extra = [punto("t-ini", 39.5, 2.5, tipo=radares.TRAMO_INICIO, tramo="t"),
+                 punto("t-fin", 39.5, 2.6, tipo=radares.TRAMO_FIN, tramo="t"),
+                 punto("z", 39.5, 2.5, tipo=radares.ZONA_MOVIL, tramo="z")]
+        self.assertEqual(len(radares.validar(self._fijos(4) + extra)), 1)
+
+    def test_falla_con_un_radar_fuera_del_bbox(self):
+        errores = radares.validar(self._fijos(5) + [punto("lejos", 41.6, -0.9)])
+        self.assertEqual(len(errores), 1)
+        self.assertIn("lejos fuera del bbox", errores[0])
+
+    def test_falla_con_ids_repetidos_o_tramo_incompleto(self):
+        base = self._fijos(5)
+        self.assertIn("ids repetidos", radares.validar(base + [punto("f0", 39.9, 3.0)]))
+        huerfano = punto("t-ini", 39.5, 2.5, tipo=radares.TRAMO_INICIO, tramo="t")
+        self.assertTrue(any("sin pareja" in e for e in radares.validar(base + [huerfano])))
+
+    def test_escribe_el_formato_v1(self):
+        filas = [
+            punto("osm-n2", 39.5, 2.6, rumbo=90, limite=50),
+            punto("osm-r1-fin", 39.6, 2.7, rumbo=45, limite=80, tipo=radares.TRAMO_FIN, tramo="osm-r1"),
+            punto("osm-r1-ini", 39.55, 2.65, rumbo=45, limite=80, tipo=radares.TRAMO_INICIO, tramo="osm-r1"),
+            punto("dgt-1", 39.52, 2.5087774, tipo=radares.ZONA_MOVIL, fuente="DGT-PDF", tramo="dgt-1"),
+            punto("dgt-0", 39.58666, 3.247777, fuente="DGT"),
+        ]
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = os.path.join(carpeta, "r.tsv")
+            radares.escribir(filas, ruta)
+            with open(ruta, encoding="utf-8", newline="") as f:
+                texto = f.read()
+        self.assertEqual(texto.split("\n"), [
+            "#radares v1",
+            "#tipo\tid\tlat\tlon\trumbo\tlimite_kmh\ttramo_id\tfuente",
+            "FIJO\tdgt-0\t39.586660\t3.247777\t\t\t\tDGT",
+            "FIJO\tosm-n2\t39.500000\t2.600000\t90\t50\t\tOSM",
+            "TRAMO_INICIO\tosm-r1-ini\t39.550000\t2.650000\t45\t80\tosm-r1\tOSM",
+            "TRAMO_FIN\tosm-r1-fin\t39.600000\t2.700000\t45\t80\tosm-r1\tOSM",
+            "ZONA_MOVIL\tdgt-1\t39.520000\t2.508777\t\t\tdgt-1\tDGT-PDF",
+            "",
+        ])
+
+    def test_de_la_cabina_real_a_la_fila_del_tsv(self):
+        cabinas, _ = radares.leer_dgt(DGT_RECORTE)
+        filas = radares.radares_dgt(cabinas, [])
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = os.path.join(carpeta, "r.tsv")
+            radares.escribir(filas, ruta)
+            with open(ruta, encoding="utf-8") as f:
+                lineas = f.read().splitlines()
+        self.assertEqual(lineas[2], "FIJO\tdgt-120451\t39.522423\t2.508777\t\t\t\tDGT")

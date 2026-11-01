@@ -1,7 +1,7 @@
 name: Datos Mallorca
 
 # Genera los datos offline de Mallorca (mapa vectorial, estilo, vias, indice de busqueda, relieve y curvas de nivel
-# del MDT05, teselas de enrutado Valhalla y, si toca, satelite PNOA z16 y z17) y los publica en una GitHub Release
+# del MDT05, teselas de enrutado Valhalla, radares DGT+OSM y, si toca, satelite PNOA z16 y z17) y los publica en una GitHub Release
 # `datos-<AAAA.MM.DD>-<run>`. La app lee releases/latest/download/manifest.json.
 #
 # Cuatro jobs para que el codigo de terceros (Maven/Planetiler, npm, pip) nunca vea un token con escritura:
@@ -41,6 +41,8 @@ env:
   PMTILES: '1.31.2'
   PMTILES_SHA256: 3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f
   GEOFABRIK: https://download.geofabrik.de/europe/spain/islas-baleares-latest.osm.pbf
+  # NAP de la DGT: cabinas de cinemometro y tramos de velocidad media (DATEX II v1, publico y sin clave).
+  DGT_RADARES: https://nap.dgt.es/datex2/dgt/PredefinedLocationsPublication/radares/content.xml
   # Debe coincidir con la version de Valhalla que lleva valhalla-mobile (0.6.4 -> submodulo Valhalla 3.9.1).
   # Digest del indice multi-arquitectura de la etiqueta 3.9.1 (obtenido del registro ghcr.io).
   VALHALLA_IMAGE: ghcr.io/valhalla/valhalla:3.9.1@sha256:4fd114eb1d26b8fc2f43bcb3df234c1b63a0bf13c277405e5943d5361dc575de
@@ -163,6 +165,23 @@ jobs:
           osmium extract -b "$BBOX" --strategy=complete_ways --overwrite \
             -o trabajo/data/sources/mallorca.osm.pbf trabajo/geofabrik/islas-baleares-latest.osm.pbf
           osmium fileinfo trabajo/data/sources/mallorca.osm.pbf
+
+      # Radares fijos, de tramo y zonas de radar movil: XML de la DGT + OSM (relaciones enforcement) -> un TSV de pocos KB
+      # que va en manifest.json (id `radares`, opcional). Va aqui, antes de Planetiler, para que un cambio de formato de
+      # la DGT o menos de 5 radares fijos / alguno fuera del bbox hagan fallar el job en minutos y no tras horas.
+      # Si solo falla la descarga de la DGT, sale el TSV solo con OSM y un aviso.
+      - name: Radares (DGT + OSM)
+        run: |
+          set -euo pipefail
+          mkdir -p trabajo/dgt
+          dgt=()
+          if curl -fsSL --retry 3 --max-time 120 --max-filesize 20000000 -o trabajo/dgt/radares.xml "$DGT_RADARES"; then
+            dgt=(--dgt trabajo/dgt/radares.xml)
+          else
+            echo "::warning::No se pudo descargar el XML de radares de la DGT: radares-mallorca.tsv solo con OSM"
+          fi
+          python -I scripts/radares.py --pbf trabajo/data/sources/mallorca.osm.pbf "${dgt[@]}"             --salida salida/radares-mallorca.tsv
+          head -c 600 salida/radares-mallorca.tsv
 
       - name: Planetiler (protomaps/basemaps) y mapa vectorial
         run: |
@@ -465,7 +484,7 @@ jobs:
               echo '- `manifest-extra.json`: índice de los archivos opcionales que la app no baja por defecto (satélite z17).'
             fi
             echo
-            echo "Atribuciones: © OpenStreetMap contributors (ODbL 1.0); PNOA y MDT05 CC-BY 4.0 scne.es (IGN);"
+            echo "Atribuciones: © OpenStreetMap contributors (ODbL 1.0); radares: DGT (NAP, CC BY); PNOA y MDT05 CC-BY 4.0 scne.es (IGN);"
             echo "Protomaps basemaps (BSD-3-Clause, CC0-1.0); fuentes Noto Sans (OFL-1.1)."
           } > trabajo/notas.md
           gh release create "$TAG" salida/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
