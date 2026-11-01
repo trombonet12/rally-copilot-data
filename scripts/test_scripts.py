@@ -502,9 +502,17 @@ class SqliteBusquedaTest(unittest.TestCase):
                 columnas = [(r[1], r[2]) for r in con.execute("PRAGMA table_info(lugares)")]
                 self.assertEqual(columnas, [
                     ("nombre", "TEXT"), ("nombre_norm", "TEXT"), ("tipo", "TEXT"), ("categoria", "TEXT"),
-                    ("municipio", "TEXT"), ("lat", "REAL"), ("lon", "REAL"), ("importancia", "INTEGER")])
+                    ("municipio", "TEXT"), ("lat", "REAL"), ("lon", "REAL"), ("importancia", "INTEGER"),
+                    ("municipio_norm", "TEXT")])
                 indices = [r[1] for r in con.execute("PRAGMA index_list(lugares)")]
                 self.assertEqual(indices, ["lugares_nombre_norm"])
+                self.assertEqual([(r[1], r[2], r[3], r[5]) for r in con.execute("PRAGMA table_info(palabras)")],
+                                 [("palabra", "TEXT", 1, 1), ("lugar", "INTEGER", 1, 2)])  # (nombre, tipo, notnull, pk)
+                self.assertIn("WITHOUT ROWID", con.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = 'palabras'").fetchone()[0])
+                self.assertEqual(
+                    con.execute("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'palabras' "
+                                "AND sql IS NOT NULL").fetchone()[0], 0)  # ningun indice aparte
                 plan = " ".join(str(r) for r in con.execute(
                     "EXPLAIN QUERY PLAN SELECT nombre FROM lugares WHERE nombre_norm >= 'soll' AND nombre_norm < 'solm'"))
                 self.assertIn("lugares_nombre_norm", plan)
@@ -522,6 +530,257 @@ class SqliteBusquedaTest(unittest.TestCase):
                     "SELECT nombre_norm, tipo, categoria, municipio, typeof(lat), typeof(lon), typeof(importancia) "
                     "FROM lugares WHERE nombre = 'Palma'").fetchone()
                 self.assertEqual(fila, ("palma", "place:city", "ciudad", "Palma", "real", "real", "integer"))
+            finally:
+                con.close()
+
+
+class PalabrasBusquedaTest(unittest.TestCase):
+    FILAS = SqliteBusquedaTest.FILAS + [
+        ("Hospital Universitari Son Espases", "amenity:hospital", "hospital", "Palma", 39.605, 2.605, 32),
+        ("Carrer de Colom", "highway:residential", "calle", "Palma", 39.57, 2.65, 15),
+        ("Plaça d'Es Born", "highway:pedestrian", "calle", "", 39.571, 2.651, 13),
+    ]
+
+    def test_palabras_de_normaliza_deduplica_y_quita_vacias(self):
+        self.assertEqual(busqueda.palabras_de("Hospital Universitari Son Espases"),
+                         ["hospital", "universitari", "son", "espases"])
+        self.assertEqual(busqueda.palabras_de("Carrer de la Lluna", "Sóller"), ["carrer", "lluna", "soller"])
+        self.assertEqual(busqueda.palabras_de("Cala d'Or", "Santanyí"), ["cala", "or", "santanyi"])
+        self.assertEqual(busqueda.palabras_de("Sa Pobla", "Sa Pobla"), ["pobla"])
+        self.assertEqual(busqueda.palabras_de("Es Pil·larí", ""), ["pillari"])
+        self.assertEqual(busqueda.palabras_de("Es"), [])
+        self.assertEqual(busqueda.palabras_de(""), [])
+
+    def test_lista_de_palabras_vacias(self):
+        self.assertEqual(
+            sorted(busqueda.PALABRAS_VACIAS),
+            sorted("de del la el les los las d l s sa es en i y a al".split()))
+
+    def _abrir(self, carpeta):
+        ruta = os.path.join(carpeta, "b.sqlite")
+        busqueda.escribir_sqlite(ruta, self.FILAS)
+        return sqlite3.connect(ruta)
+
+    def test_palabras_del_nombre_y_del_municipio_enlazadas_por_rowid(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            con = self._abrir(carpeta)
+            try:
+                self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 2)
+                por_lugar = {}
+                for nombre, palabra in con.execute(
+                        "SELECT l.nombre, p.palabra FROM palabras p JOIN lugares l ON l.rowid = p.lugar"):
+                    por_lugar.setdefault(nombre, set()).add(palabra)
+                self.assertEqual(por_lugar["Hospital Universitari Son Espases"],
+                                 {"hospital", "universitari", "son", "espases", "palma"})
+                self.assertEqual(por_lugar["Carrer de Colom"], {"carrer", "colom", "palma"})
+                self.assertEqual(por_lugar["Plaça d'Es Born"], {"placa", "born"})  # sin municipio
+                self.assertEqual(por_lugar["Cala d'Or"], {"cala", "or", "santanyi"})
+                self.assertEqual(por_lugar["Palma"], {"palma"})
+                vacias = tuple(busqueda.PALABRAS_VACIAS)
+                self.assertEqual(con.execute(
+                    f"SELECT count(*) FROM palabras WHERE palabra IN ({','.join('?' * len(vacias))}) OR palabra = ''",
+                    vacias).fetchone()[0], 0)
+                self.assertEqual(con.execute(
+                    "SELECT count(*) FROM (SELECT 1 FROM palabras GROUP BY palabra, lugar HAVING count(*) > 1)"
+                ).fetchone()[0], 0)
+                self.assertEqual(
+                    con.execute("SELECT municipio_norm FROM lugares WHERE nombre = ?", ("Sóller",)).fetchone()[0],
+                    "soller")
+                self.assertEqual(
+                    con.execute("SELECT municipio_norm FROM lugares WHERE nombre = ?", ("Plaça d'Es Born",)).fetchone()[0],
+                    "")
+            finally:
+                con.close()
+
+    def test_busqueda_por_palabras_con_prefijo_y_usa_el_indice(self):
+        def buscar(con, *consulta):
+            sql = "SELECT nombre FROM lugares WHERE 1"
+            args = []
+            for palabra in consulta:
+                sql += " AND rowid IN (SELECT lugar FROM palabras WHERE palabra >= ? AND palabra < ?)"
+                args += [palabra, palabra[:-1] + chr(ord(palabra[-1]) + 1)]
+            return [r[0] for r in con.execute(sql + " ORDER BY importancia DESC", args)]
+
+        with tempfile.TemporaryDirectory() as carpeta:
+            con = self._abrir(carpeta)
+            try:
+                self.assertEqual(buscar(con, "hospital", "espases"), ["Hospital Universitari Son Espases"])
+                self.assertEqual(buscar(con, "espas", "hosp"), ["Hospital Universitari Son Espases"])
+                self.assertEqual(buscar(con, "colom", "palma"), ["Carrer de Colom"])
+                self.assertEqual(buscar(con, "colom", "soller"), [])
+                self.assertEqual(buscar(con, "palma"), [
+                    "Palma", "Col·legi Públic", "Hospital Universitari Son Espases", "Carrer de Colom"])
+                plan = " ".join(str(r) for r in con.execute(
+                    "EXPLAIN QUERY PLAN SELECT lugar FROM palabras WHERE palabra >= 'colo' AND palabra < 'colp'"))
+                self.assertIn("PRIMARY KEY", plan)
+            finally:
+                con.close()
+
+
+class GeometriaAreasTest(unittest.TestCase):
+    def test_area_y_centroide_de_un_poligono(self):
+        rectangulo = [(0, 0), (4, 0), (4, 2), (0, 2)]
+        self.assertAlmostEqual(busqueda.area_anillo(rectangulo), 8)
+        self.assertEqual(busqueda.centroide_poligono(rectangulo), (2.0, 1.0))
+        self.assertEqual(busqueda.centroide_poligono(list(reversed(rectangulo))), (2.0, 1.0))
+        # «L»: el centroide ponderado no es la media de los vertices
+        ele = [(0, 0), (4, 0), (4, 1), (1, 1), (1, 4), (0, 4)]
+        x, y = busqueda.centroide_poligono(ele)
+        self.assertAlmostEqual(x, 1.357143, places=5)
+        self.assertAlmostEqual(y, 1.357143, places=5)
+        # degenerado (area nula): media de vertices
+        self.assertEqual(busqueda.centroide_poligono([(0, 0), (2, 0), (4, 0)]), (2.0, 0.0))
+
+    def test_deduplica_mismo_nombre_a_menos_de_100_m(self):
+        base = [
+            ("Hospital Son Espases", "amenity:hospital", "hospital", "Palma", 39.6050, 2.6050, 32),
+            ("Castell de Bellver", "historic:castle", "castillo", "Palma", 39.5600, 2.6200, 35),
+            ("Carrer del Parc", "highway:residential", "calle", "Palma", 39.5700, 2.6500, 15),
+        ]
+        nuevas = {
+            # ~11 m del nodo existente (con otra grafia): fuera
+            ("Hôspital Son Espases", "amenity:hospital", "hospital", "Palma", 39.6051, 2.6050, 32),
+            # mismo nombre pero a ~1,1 km: se queda
+            ("Castell de Bellver", "historic:castle", "castillo", "Palma", 39.5700, 2.6200, 35),
+            # mismo nombre que una calle, en el mismo sitio: una calle no la absorbe
+            ("Carrer del Parc", "leisure:park", "otro", "Palma", 39.5700, 2.6500, 31),
+            # dos areas iguales entre si: solo una
+            ("Campus UIB", "amenity:university", "otro", "Palma", 39.6360, 2.6490, 32),
+            ("Campus UIB", "amenity:university", "otro", "Palma", 39.6361, 2.6490, 32),
+        }
+        salida = busqueda.deduplicar_areas(base, nuevas)
+        self.assertEqual(sorted(f[0] for f in salida), ["Campus UIB", "Carrer del Parc", "Castell de Bellver"])
+        # radio ajustable: a ~11 m cae dentro de 100 m y fuera de 5 m
+        cerca = [("Hospital Son Espases", "amenity:hospital", "hospital", "Palma", 39.6051, 2.6050, 32)]
+        self.assertEqual(busqueda.deduplicar_areas(base, cerca), [])
+        self.assertEqual(busqueda.deduplicar_areas(base, cerca, radio_m=5), cerca)
+
+
+class NegociosBusquedaTest(unittest.TestCase):
+    def test_negocios_con_nombre_se_clasifican_como_poi(self):
+        casos = [
+            ({"shop": "bakery"}, ("shop:bakery", "otro", 30)),
+            ({"shop": "supermarket"}, ("shop:supermarket", "supermercado", 30)),
+            ({"amenity": "bar"}, ("amenity:bar", "otro", 32)),
+            ({"amenity": "bank"}, ("amenity:bank", "otro", 32)),
+            ({"amenity": "bicycle_rental"}, ("amenity:bicycle_rental", "otro", 32)),
+            ({"tourism": "apartment"}, ("tourism:apartment", "otro", 36)),
+            ({"leisure": "fitness_centre"}, ("leisure:fitness_centre", "otro", 31)),
+        ]
+        for etiquetas, esperado in casos:
+            self.assertEqual(busqueda.clasificar_poi(etiquetas), esperado, etiquetas)
+
+    def test_lugares_por_encima_de_negocios_y_estos_por_encima_de_calles(self):
+        negocio_max = max(i for _, i in busqueda.CLAVES_POI)
+        negocio_min = min(i for _, i in busqueda.CLAVES_POI)
+        lugar_min = min(i for _, i in busqueda.LUGARES.values())
+        calle_max = max(busqueda.IMPORTANCIA_VIA.values())
+        self.assertGreater(lugar_min, negocio_max)
+        self.assertGreater(negocio_min, calle_max)  # las calles quedan POR DEBAJO de los negocios en empate de texto
+
+
+def _escribir_pbf_sintetico(ruta):
+    """Palma (admin_level=8, cuadrado 2.50..2.80 x 39.50..39.70) con un hospital como nodo y como multipoligono (a ~8 m),
+    un castillo y un campus solo como multipoligono, una relacion sin etiquetas de POI, una calle, un negocio y una aldea."""
+    import osmium  # noqa: PLC0415
+    from osmium.osm import mutable  # noqa: PLC0415
+
+    def cuadrado(ids, lon0, lat0, lon1, lat1):
+        return [mutable.Node(id=i, location=(x, y)) for i, (x, y) in
+                zip(ids, [(lon0, lat0), (lon1, lat0), (lon1, lat1), (lon0, lat1)])]
+
+    nodos = (
+        cuadrado([1, 2, 3, 4], 2.50, 39.50, 2.80, 39.70)  # Palma
+        + cuadrado([11, 12, 13, 14], 2.600, 39.600, 2.610, 39.610)  # hospital (centroide 2.605, 39.605)
+        + cuadrado([15, 16, 17, 18], 2.620, 39.550, 2.630, 39.560)  # castillo
+        + cuadrado([19, 20, 24, 25], 2.700, 39.640, 2.710, 39.650)  # campus
+        + cuadrado([26, 27, 28, 29], 2.520, 39.520, 2.530, 39.530)  # solar sin POI
+        + [mutable.Node(id=21, location=(2.6051, 39.6050),
+                        tags={"name": "Hospital Universitari Son Espases", "amenity": "hospital"}),
+           mutable.Node(id=22, location=(2.700, 39.600), tags={"name": "Forn Colom", "shop": "bakery"}),
+           mutable.Node(id=23, location=(2.720, 39.650), tags={"name": "Colom", "place": "hamlet"}),
+           mutable.Node(id=31, location=(2.650, 39.570)), mutable.Node(id=32, location=(2.651, 39.570))])
+    nodos.sort(key=lambda n: n.id)
+    vias = [
+        mutable.Way(id=100, nodes=[1, 2, 3, 4, 1]),
+        mutable.Way(id=101, nodes=[11, 12, 13, 14, 11]),
+        mutable.Way(id=102, nodes=[15, 16, 17, 18, 15]),
+        mutable.Way(id=103, nodes=[31, 32], tags={"name": "Carrer de Colom", "highway": "residential"}),
+        mutable.Way(id=104, nodes=[19, 20, 24, 25, 19]),
+        mutable.Way(id=105, nodes=[26, 27, 28, 29, 26]),
+    ]
+    relaciones = [
+        mutable.Relation(id=200, members=[("w", 100, "outer")],
+                         tags={"type": "boundary", "boundary": "administrative", "admin_level": "8", "name": "Palma"}),
+        mutable.Relation(id=201, members=[("w", 101, "outer")],
+                         tags={"type": "multipolygon", "name": "Hospital Universitari Son Espases",
+                               "amenity": "hospital"}),
+        mutable.Relation(id=202, members=[("w", 102, "outer")],
+                         tags={"type": "multipolygon", "name": "Castell de Bellver", "historic": "castle"}),
+        mutable.Relation(id=203, members=[("w", 104, "outer")],
+                         tags={"type": "multipolygon", "name": "Campus Universitari", "amenity": "university"}),
+        mutable.Relation(id=204, members=[("w", 105, "outer")],
+                         tags={"type": "multipolygon", "name": "Solar", "landuse": "brownfield"}),
+    ]
+    with osmium.SimpleWriter(ruta, overwrite=True) as w:
+        for objeto in nodos:
+            w.add_node(objeto)
+        for objeto in vias:
+            w.add_way(objeto)
+        for objeto in relaciones:
+            w.add_relation(objeto)
+
+
+try:
+    import osmium as _osmium  # noqa: F401
+
+    HAY_OSMIUM = True
+except ImportError:
+    HAY_OSMIUM = False
+
+
+@unittest.skipUnless(HAY_OSMIUM, "pyosmium no esta instalado (el workflow lo instala antes de la segunda tanda de pruebas)")
+class PbfSinteticoBusquedaTest(unittest.TestCase):
+    def test_pipeline_completo_con_multipoligonos_palabras_y_user_version(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            pbf = os.path.join(carpeta, "sintetico.osm.pbf")
+            salida = os.path.join(carpeta, "busqueda.sqlite")
+            _escribir_pbf_sintetico(pbf)
+            self.assertEqual(busqueda.generar(pbf, salida), 0)
+            con = sqlite3.connect(salida)
+            try:
+                self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 2)
+                filas = {(r[0], r[1]): r[2:] for r in con.execute(
+                    "SELECT nombre, categoria, municipio, municipio_norm, importancia, lat, lon FROM lugares")}
+                # el hospital sale una sola vez (el multipoligono se descarta por estar a < 100 m del nodo)
+                self.assertEqual(
+                    [k for k in filas if k[0] == "Hospital Universitari Son Espases"],
+                    [("Hospital Universitari Son Espases", "hospital")])
+                castillo = filas[("Castell de Bellver", "castillo")]
+                self.assertEqual(castillo[0:2], ("Palma", "palma"))
+                self.assertAlmostEqual(castillo[3], 39.555, places=5)
+                self.assertAlmostEqual(castillo[4], 2.625, places=5)
+                campus = filas[("Campus Universitari", "otro")]
+                self.assertEqual((campus[0], campus[2]), ("Palma", 32))
+                self.assertAlmostEqual(campus[3], 39.645, places=5)
+                self.assertNotIn("Solar", {k[0] for k in filas})  # relacion sin etiquetas de POI
+                self.assertEqual(filas[("Forn Colom", "otro")][0], "Palma")
+                self.assertEqual(filas[("Carrer de Colom", "calle")][0], "Palma")
+
+                def buscar(*consulta):
+                    sql = "SELECT nombre FROM lugares WHERE 1"
+                    args = []
+                    for palabra in consulta:
+                        sql += " AND rowid IN (SELECT lugar FROM palabras WHERE palabra >= ? AND palabra < ?)"
+                        args += [palabra, palabra[:-1] + chr(ord(palabra[-1]) + 1)]
+                    return [r[0] for r in con.execute(sql + " ORDER BY importancia DESC, nombre", args)]
+
+                self.assertEqual(buscar("hospital", "espases"), ["Hospital Universitari Son Espases"])
+                self.assertEqual(buscar("castell", "palma"), ["Castell de Bellver"])
+                self.assertEqual(buscar("campus"), ["Campus Universitari"])
+                # lugar (aldea 60) > negocio (30) > calle (15) con el mismo texto
+                self.assertEqual(buscar("colom", "palma"), ["Colom", "Forn Colom", "Carrer de Colom"])
+                self.assertEqual(buscar("colom"), ["Colom", "Forn Colom", "Carrer de Colom"])
             finally:
                 con.close()
 

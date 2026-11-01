@@ -17,6 +17,19 @@ Tabla `lugares` (`PRAGMA user_version` = 2), indice `lugares_nombre_norm` sobre 
   lat, lon      REAL. Grados decimales (6 decimales)
   importancia   INTEGER. Para ordenar (mayor = mas importante): ciudad 100 > pueblo 90/80 > aldea 60 > barrio 50 >
                 paraje 45 > playa/pico/cala/cabo 40 > aeropuerto 38 > POIs 36-30 > calles 20-10
+  municipio_norm TEXT. `nombre_norm(municipio)` (vacio si no hay municipio). Columna añadida al final.
+
+Tabla `palabras` (busqueda por palabras; WITHOUT ROWID con PRIMARY KEY (palabra, lugar): ese es el indice por palabra, no hay otro). NO cambia `user_version`: las apps
+que solo conocen `lugares` la ignoran.
+  palabra       TEXT NOT NULL. Una palabra normalizada (ver `palabras_de`) del nombre o del municipio del lugar
+  lugar         INTEGER NOT NULL. `rowid` de `lugares`
+  Una fila por (lugar, palabra distinta), con las palabras del nombre Y del municipio («colom palma» encuentra
+  «Carrer de Colom» de Palma). Busqueda: cada palabra de la consulta (normalizada igual, sin palabras vacias) es un
+  prefijo que el lugar debe tener:
+  SELECT nombre FROM lugares WHERE rowid IN (SELECT lugar FROM palabras WHERE palabra >= 'hosp' AND palabra < 'hosq')
+    AND rowid IN (SELECT lugar FROM palabras WHERE palabra >= 'espa' AND palabra < 'espb') ORDER BY importancia DESC;
+  Palabras vacias (no se indexan; la app las descarta de la consulta con la misma lista, `PALABRAS_VACIAS`):
+  de, del, la, el, les, los, las, d, l, s, sa, es, en, i, y, a, al
 
 Funcion `nombre_norm(texto)` (la app la replica en Kotlin con los mismos casos de test; ver test_scripts.py):
   1. minusculas (`str.lower`)
@@ -29,6 +42,12 @@ Busqueda: la consulta se normaliza igual. Prefijo del nombre (usa el indice):
   SELECT nombre, categoria, municipio, lat, lon FROM lugares
   WHERE nombre_norm >= 'soll' AND nombre_norm < 'solm' ORDER BY importancia DESC LIMIT 20;
 Prefijo de cualquier palabra (sin indice): `nombre_norm LIKE 'soll%' OR nombre_norm LIKE '% soll%'`.
+
+POIs dibujados como multipoligono (relaciones con `name` y etiquetas de POI: hospitales, castillos, campus...) se
+añaden con el centroide de su anillo exterior mayor (handler `area` de pyosmium, como `Limites`); se descarta el que
+repite el nombre normalizado de otro lugar (no calle) a menos de 100 m (`deduplicar_areas`). Los negocios con nombre
+(shop, amenity, tourism, leisure) se mantienen con importancia de POI (36-30): por debajo de lugares y POIs naturales y
+POR ENCIMA de las calles (20-10).
 
 Municipio de cada punto: punto en poligono contra los municipios (admin_level=8). El poligono se indexa por bandas de
 latitud para que cada consulta recorra pocas aristas; los puntos fuera de todo poligono (p. ej. en el mar) quedan con
@@ -90,6 +109,9 @@ IMPORTANCIA_VIA = {
 }
 IMPORTANCIA_VIA_DEFECTO = 10
 VERSION_ESQUEMA = 2
+# Palabras que no se indexan en `palabras` (articulos y preposiciones catalanes/castellanas, ya normalizadas).
+PALABRAS_VACIAS = frozenset({"de", "del", "la", "el", "les", "los", "las", "d", "l", "s", "sa", "es", "en", "i", "y", "a", "al"})
+RADIO_DEDUP_M = 100.0
 CATEGORIAS_FIJAS = {"ciudad", "pueblo", "aldea", "barrio", "paraje", "calle"}
 
 
@@ -105,6 +127,16 @@ def nombre_norm(texto: str) -> str:
     t = texto.lower().replace("l·l", "ll").replace("ŀl", "ll")
     t = "".join(c for c in unicodedata.normalize("NFD", t) if not unicodedata.combining(c))
     return " ".join(t.translate(_APOSTROFOS_Y_GUIONES).split())
+
+
+def palabras_de(*textos: str) -> list[str]:
+    """Palabras normalizadas distintas (en orden de aparicion) de los textos, sin `PALABRAS_VACIAS`."""
+    vistas: dict[str, None] = {}
+    for texto in textos:
+        for palabra in nombre_norm(texto).split():
+            if palabra not in PALABRAS_VACIAS:
+                vistas.setdefault(palabra)
+    return list(vistas)
 
 
 def nombres_de(etiquetas) -> list[str]:
@@ -210,6 +242,48 @@ def centroide(puntos):
     return (sum(p[0] for p in puntos) / len(puntos), sum(p[1] for p in puntos) / len(puntos))
 
 
+def area_anillo(puntos) -> float:
+    """Area absoluta (grados al cuadrado) de un anillo; solo sirve para comparar anillos entre si."""
+    n = len(puntos)
+    return abs(sum(puntos[i][0] * puntos[(i + 1) % n][1] - puntos[(i + 1) % n][0] * puntos[i][1] for i in range(n))) / 2
+
+
+def centroide_poligono(puntos):
+    """Centroide ponderado por area de un anillo; media de vertices si el area es nula."""
+    n = len(puntos)
+    area2 = cx = cy = 0.0
+    for i in range(n):
+        x1, y1 = puntos[i]
+        x2, y2 = puntos[(i + 1) % n]
+        cruz = x1 * y2 - x2 * y1
+        area2 += cruz
+        cx += (x1 + x2) * cruz
+        cy += (y1 + y2) * cruz
+    if abs(area2) < 1e-18:
+        return centroide(puntos)
+    return (cx / (3 * area2), cy / (3 * area2))
+
+
+def deduplicar_areas(base, nuevas, radio_m: float = RADIO_DEDUP_M):
+    """Filas de `nuevas` (POIs de multipoligono) sin las que repiten nombre normalizado a menos de `radio_m` de otro lugar.
+
+    Se comparan con las filas de `base` que no son calles y con las ya aceptadas de `nuevas`. Filas: ver `escribir_sqlite`.
+    """
+    vistos: dict[str, list] = {}
+    for f in base:
+        if f[2] != "calle":
+            vistos.setdefault(nombre_norm(f[0]), []).append((f[5], f[4]))
+    salida = []
+    for f in sorted(set(nuevas), key=lambda f: (-f[6], f[0], f[3], f[1], f[4], f[5])):
+        punto = (f[5], f[4])
+        puntos = vistos.setdefault(nombre_norm(f[0]), [])
+        if any(distancia_m(punto, otro) < radio_m for otro in puntos):
+            continue
+        puntos.append(punto)
+        salida.append(f)
+    return salida
+
+
 def representante(puntos):
     """De varios puntos (uno por via), el mas cercano a su centro: una calle partida en tramos queda en uno de ellos."""
     if len(puntos) == 1:
@@ -283,9 +357,10 @@ def municipio_de(lon: float, lat: float, municipios) -> str:
 # ---------------------------------------------------------------------------------------------------------------
 
 def escribir_sqlite(ruta: str, filas) -> int:
-    """Escribe la tabla `lugares` en `ruta` (via un temporal y os.replace). Devuelve el numero de filas.
+    """Escribe `lugares` y `palabras` en `ruta` (via un temporal y os.replace). Devuelve el numero de filas.
 
-    Cada fila: (nombre, tipo, categoria, municipio, lat, lon, importancia); `nombre_norm` se calcula aqui.
+    Cada fila: (nombre, tipo, categoria, municipio, lat, lon, importancia); `nombre_norm`, `municipio_norm` y las
+    palabras se calculan aqui. El `rowid` de `lugares` (1, 2, 3... en el orden de `filas`) es el `lugar` de `palabras`.
     """
     temporal = ruta + ".tmp"
     if os.path.exists(temporal):
@@ -297,13 +372,22 @@ def escribir_sqlite(ruta: str, filas) -> int:
         con.execute(
             "CREATE TABLE lugares (nombre TEXT NOT NULL, nombre_norm TEXT NOT NULL, tipo TEXT NOT NULL, "
             "categoria TEXT NOT NULL, municipio TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, "
-            "importancia INTEGER NOT NULL)"
+            "importancia INTEGER NOT NULL, municipio_norm TEXT NOT NULL)"
         )
-        con.executemany(
-            "INSERT INTO lugares (nombre, nombre_norm, tipo, categoria, municipio, lat, lon, importancia) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ((f[0], nombre_norm(f[0]), f[1], f[2], f[3], f[4], f[5], f[6]) for f in filas),
+        con.execute(
+            "CREATE TABLE palabras (palabra TEXT NOT NULL, lugar INTEGER NOT NULL, PRIMARY KEY (palabra, lugar)) "
+            "WITHOUT ROWID"
         )
+        for f in filas:
+            cursor = con.execute(
+                "INSERT INTO lugares (nombre, nombre_norm, tipo, categoria, municipio, lat, lon, importancia, "
+                "municipio_norm) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f[0], nombre_norm(f[0]), f[1], f[2], f[3], f[4], f[5], f[6], nombre_norm(f[3])),
+            )
+            con.executemany(
+                "INSERT INTO palabras (palabra, lugar) VALUES (?, ?)",
+                ((p, cursor.lastrowid) for p in palabras_de(f[0], f[3])),
+            )
         con.execute("CREATE INDEX lugares_nombre_norm ON lugares (nombre_norm)")
         con.execute(f"PRAGMA user_version = {VERSION_ESQUEMA}")
         con.commit()
@@ -343,12 +427,13 @@ def _crear_handlers():
                 municipio.anadir_parte(anillo, huecos)
 
     class Lugares(osmium.SimpleHandler):
-        """Lugares, POIs y calles con nombre (nodos y vias; las relaciones/multipoligonos no se leen)."""
+        """Lugares, POIs y calles con nombre (nodos, vias y multipoligonos de relacion)."""
 
         def __init__(self, municipios):
             super().__init__()
             self.municipios = municipios
             self.filas: set[tuple] = set()
+            self.filas_area: set[tuple] = set()  # POIs de multipoligono (se deduplican al final)
             self.calles: dict[tuple[str, str], list] = {}
 
         def _fila(self, nombre, tipo, categoria, lon, lat, importancia):
@@ -390,7 +475,58 @@ def _crear_handlers():
             lon, lat = centroide(puntos)
             self._objeto(etiquetas, lon, lat)
 
+        def area(self, a):
+            if a.from_way():  # las vias cerradas ya pasan por `way`
+                return
+            etiquetas = a.tags
+            if not etiquetas.get("name") or etiquetas.get("boundary") == "administrative":
+                return
+            poi = clasificar_poi(etiquetas)
+            if not poi:
+                return
+            anillos = [[(n.lon, n.lat) for n in exterior] for exterior in a.outer_rings()]
+            anillos = [r for r in anillos if len(r) >= 3]
+            if not anillos:
+                return
+            lon, lat = centroide_poligono(max(anillos, key=area_anillo))
+            municipio = municipio_de(lon, lat, self.municipios)
+            for nombre in nombres_de(etiquetas):
+                self.filas_area.add((nombre, poi[0], poi[1], municipio, round(lat, 6), round(lon, 6), poi[2]))
+
     return Limites, Lugares
+
+
+def generar(entrada: str, salida: str, limites_pbf: str | None = None) -> int:
+    """Lee los PBF y escribe el SQLite. Devuelve 0 si todo va bien."""
+    Limites, Lugares = _crear_handlers()
+    limites = Limites()
+    limites.apply_file(limites_pbf or entrada, locations=True)
+    municipios = sorted(limites.por_nombre.values(), key=lambda m: m.nombre)
+    print(f"municipios: {len(municipios)}")
+    if not municipios:
+        print("::error::No se ha podido construir ningun municipio (admin_level=8); revisa --limites", file=sys.stderr)
+        return 1
+
+    lugares = Lugares(municipios)
+    lugares.apply_file(entrada, locations=True)
+
+    filas = set(lugares.filas)
+    for (nombre, municipio), (puntos, importancia, tipo) in lugares.calles.items():
+        lon, lat = representante(puntos)
+        filas.add((nombre, tipo, "calle", municipio, round(lat, 6), round(lon, 6), importancia))
+    areas = deduplicar_areas(filas, lugares.filas_area)
+    print(f"POIs de multipoligono: {len(areas)} (repetidos descartados: {len(lugares.filas_area) - len(areas)})")
+    filas = sorted(filas | set(areas), key=lambda f: (-f[6], f[0], f[3], f[1]))
+
+    total = escribir_sqlite(salida, filas)
+    por_tipo: dict[str, int] = {}
+    for f in filas:
+        clave = f[2] if f[2] in CATEGORIAS_FIJAS else "poi"
+        por_tipo[clave] = por_tipo.get(clave, 0) + 1
+    sin_municipio = sum(1 for f in filas if not f[3])
+    print(f"filas: {total} ({', '.join(f'{k} {v}' for k, v in sorted(por_tipo.items()))}); sin municipio: {sin_municipio}")
+    print(f"{salida}: {os.path.getsize(salida)} bytes")
+    return 0 if total > 0 else 1
 
 
 def main() -> int:
@@ -399,34 +535,7 @@ def main() -> int:
     p.add_argument("salida", help="busqueda-mallorca.sqlite")
     p.add_argument("--limites", help="PBF con las relaciones admin_level=8 y sus miembros (por defecto, la entrada)")
     args = p.parse_args()
-
-    Limites, Lugares = _crear_handlers()
-    limites = Limites()
-    limites.apply_file(args.limites or args.entrada, locations=True)
-    municipios = sorted(limites.por_nombre.values(), key=lambda m: m.nombre)
-    print(f"municipios: {len(municipios)}")
-    if not municipios:
-        print("::error::No se ha podido construir ningun municipio (admin_level=8); revisa --limites", file=sys.stderr)
-        return 1
-
-    lugares = Lugares(municipios)
-    lugares.apply_file(args.entrada, locations=True)
-
-    filas = set(lugares.filas)
-    for (nombre, municipio), (puntos, importancia, tipo) in lugares.calles.items():
-        lon, lat = representante(puntos)
-        filas.add((nombre, tipo, "calle", municipio, round(lat, 6), round(lon, 6), importancia))
-    filas = sorted(filas, key=lambda f: (-f[6], f[0], f[3], f[1]))
-
-    total = escribir_sqlite(args.salida, filas)
-    por_tipo: dict[str, int] = {}
-    for f in filas:
-        clave = f[2] if f[2] in CATEGORIAS_FIJAS else "poi"
-        por_tipo[clave] = por_tipo.get(clave, 0) + 1
-    sin_municipio = sum(1 for f in filas if not f[3])
-    print(f"filas: {total} ({', '.join(f'{k} {v}' for k, v in sorted(por_tipo.items()))}); sin municipio: {sin_municipio}")
-    print(f"{args.salida}: {os.path.getsize(args.salida)} bytes")
-    return 0 if total > 0 else 1
+    return generar(args.entrada, args.salida, args.limites)
 
 
 if __name__ == "__main__":

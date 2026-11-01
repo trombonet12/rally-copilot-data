@@ -15,7 +15,7 @@ release y solo baja los que han cambiado.
 | `pnoa-mallorca-z16.pmtiles` | Ortofoto satélite z0–16 (JPEG sin recomprimir) | PNOA, IGN |
 | `pnoa-mallorca-z17.pmtiles` | Ortofoto satélite solo z17 (JPEG sin recomprimir; se superpone al z16 para más detalle). **Opcional y fuera de `manifest.json`**: va en `manifest-extra.json` (`id` `satelite-z17`) | PNOA, IGN |
 | `valhalla-mallorca.tar` | Teselas de enrutado de Valhalla 3.9.1 (tar de extracción con `index.bin`) para [valhalla-mobile](https://github.com/Rallista/valhalla-mobile) 0.6.4. Archivo opcional en el manifest (`id` `valhalla`) | OpenStreetMap vía Geofabrik |
-| `busqueda-mallorca.sqlite` | Índice de búsqueda: SQLite con la tabla `lugares` (lugares, calles y POIs con nombre; sin FTS5). Opcional (`id` `busqueda`) | OpenStreetMap |
+| `busqueda-mallorca.sqlite` | Índice de búsqueda: SQLite con las tablas `lugares` (lugares, calles y POIs con nombre) y `palabras` (índice por palabras); sin FTS5. Opcional (`id` `busqueda`) | OpenStreetMap |
 | `relieve-mallorca.pmtiles` | Relieve para sombreado (`raster-dem` Terrarium, teselas PNG de 512 px, z7–13, alturas a 0,25 m). Opcional (`id` `relieve`) | MDT05, IGN |
 | `curvas-mallorca.pmtiles` | Curvas de nivel cada 10 m (capa `curvas`, z11–14; atributos `ele` e `indice` = 1 cada 50 m). Opcional (`id` `curvas`) | MDT05, IGN |
 | `vias-notas-mallorca.tsv.gz` | Etiquetas de vías y nodos de OSM y perfil de altura (5 m) de cada vía, para las notas de rally (formato `#vias-notas v1`, ver abajo). Opcional (`id` `vias-notas`) | OpenStreetMap, MDT05 (IGN) |
@@ -50,18 +50,32 @@ hay que vaciar `SEPARADOS` en `scripts/manifest.py`, cuando ya no queden apps an
   (sin FTS5, funciona con la SQLite de Android), con `PRAGMA user_version = 2` e índice sobre `nombre_norm`:
 
   ```sql
-  lugares(nombre TEXT, nombre_norm TEXT, tipo TEXT, categoria TEXT, municipio TEXT, lat REAL, lon REAL, importancia INTEGER)
+  lugares(nombre TEXT, nombre_norm TEXT, tipo TEXT, categoria TEXT, municipio TEXT, lat REAL, lon REAL, importancia INTEGER,
+          municipio_norm TEXT)
   CREATE INDEX lugares_nombre_norm ON lugares (nombre_norm);
+  palabras(palabra TEXT NOT NULL, lugar INTEGER NOT NULL, PRIMARY KEY (palabra, lugar)) WITHOUT ROWID
+  -- lugar = rowid de lugares; la clave primaria es el índice por palabra (no hay otro)
   -- prefijo del nombre (usa el índice); la consulta se normaliza igual que `nombre_norm`
   SELECT nombre, categoria, municipio, lat, lon FROM lugares
   WHERE nombre_norm >= 'soll' AND nombre_norm < 'solm' ORDER BY importancia DESC LIMIT 20;
+  -- por palabras (cada palabra de la consulta, normalizada igual, es un prefijo; «hospital son espases» -> hospital + espases)
+  SELECT nombre FROM lugares
+  WHERE rowid IN (SELECT lugar FROM palabras WHERE palabra >= 'hosp' AND palabra < 'hosq')
+    AND rowid IN (SELECT lugar FROM palabras WHERE palabra >= 'espa' AND palabra < 'espb')
+  ORDER BY importancia DESC LIMIT 20;
   ```
+- `palabras`: una fila por (lugar, palabra distinta) con las palabras (`nombre_norm`, separadas por espacios) del nombre **y** del
+  municipio del lugar, para encontrar «colom palma». Palabras vacías (no se indexan; la app las quita de la consulta con la
+  misma lista): `de del la el les los las d l s sa es en i y a al`. Es una tabla nueva y `PRAGMA user_version` sigue en 2:
+  las apps que solo conocen `lugares` la ignoran. `municipio_norm` es `nombre_norm(municipio)`, columna nueva al final de `lugares`.
 - `nombre_norm` (la app la replica en Kotlin; la tabla de casos está en `scripts/test_scripts.py`): minúsculas; `l·l` y `ŀl` -> `ll`;
   NFD y quitar marcas combinantes; apóstrofos (`' ’ ʼ ` ´`), guiones y `·` restantes -> espacio; espacios colapsados y recortados.
   «Sóller» -> `soller`, «Cala d'Or» -> `cala d or`, «Col·legi» -> `collegi`.
 - Contenido: `place` = city/town/village/hamlet/locality/neighbourhood; calles (`highway` con `name`, una fila por calle y
   municipio, en el punto medio de la vía); POIs con nombre (`amenity`, `tourism`, `historic`, `leisure`, `shop`,
-  `natural` = beach/peak/bay/cape, `man_made=lighthouse`, `aeroway=aerodrome`; nodos y vías, se ignoran los multipolígonos).
+  `natural` = beach/peak/bay/cape, `man_made=lighthouse`, `aeroway=aerodrome`; nodos, vías y multipolígonos de relación con `name`:
+  hospitales, castillos, campus... entran con el centroide de su anillo exterior mayor y se descartan si repiten el nombre normalizado de otro
+  lugar (no calle) a menos de 100 m). Los negocios con nombre (`shop`, `amenity`, `tourism`, `leisure`) se mantienen.
   Si `name:es` difiere de `name`, se añade una fila más con ese nombre.
 - `tipo`: `clave:valor` de OSM (`place:city`, `highway:residential`, `amenity:restaurant`; solo la clave si el valor es `yes`).
   `categoria` (en español): lugares `ciudad`, `pueblo`, `aldea`, `barrio`, `paraje`; calles `calle`; POIs `playa`, `cala`, `cabo`,
@@ -69,7 +83,7 @@ hay que vaciar `SEPARADOS` en `scripts/manifest.py`, cuando ya no queden apps an
   `museo`, `castillo`, `puerto`, `aeropuerto`, `hospital`, `farmacia`, `supermercado` u `otro`. Una playa cuyo nombre empieza por
   «Cala»/«Caló» es `cala`; `natural=bay` también.
 - `importancia`: ciudad 100 > pueblo 90/80 > aldea 60 > barrio 50 > paraje 45 > playa/pico/cala/cabo 40 > aeropuerto 38 >
-  turismo/histórico/faro 36–35 > amenity/ocio/tienda 32–30 > calles 20–10.
+  turismo/histórico/faro 36–35 > amenity/ocio/tienda 32–30 > calles 20–10 (en un empate de texto, los negocios quedan por encima de las calles y por debajo de lugares y POIs naturales).
 - Municipio: punto en polígono contra las relaciones `boundary=administrative` + `admin_level=8` (índice por bandas de
   latitud). Los límites se extraen del PBF completo de Baleares con `osmium tags-filter r/admin_level=8` (el recorte a
   Mallorca no trae enteras las relaciones que salen del recuadro, p. ej. Palma con Cabrera). Fuera de todo municipio: vacío.
@@ -207,7 +221,7 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 - `scripts/vias.py`: extrae las vías del PBF a TSV comprimido.
 - `scripts/radares.py`: radares fijos, de tramo y zonas móviles (DGT + OSM) a `radares-mallorca.tsv`; `datos/cinemometros-mallorca.tsv` es el extracto curado del informe de la DGT y `scripts/fixtures/` un recorte real del XML para las pruebas.
 - `scripts/vias_notas.py`: etiquetas de OSM y perfil de altura de las vías (`vias-notas-mallorca.tsv.gz`).
-- `scripts/busqueda.py`: genera el índice de búsqueda SQLite (`busqueda-mallorca.sqlite`).
+- `scripts/busqueda.py`: genera el índice de búsqueda SQLite (`busqueda-mallorca.sqlite`: `lugares` + `palabras`).
 - `scripts/relieve.sh`: MDT05 por WCS -> `relieve-mallorca.pmtiles` y `curvas-mallorca.pmtiles` (GDAL, tippecanoe).
 - `scripts/satelite.py`: descarga las teselas PNOA entre `--zmin` (0 por defecto) y `--zmax` a un MBTiles (reanudable; anota las teselas de mar en la tabla `sin_cobertura` para no repetirlas).
 - `scripts/estilo.mjs`: genera estilos (con relieve, curvas y placas), sprites y fuentes (dependencia npm en `estilo/`).
