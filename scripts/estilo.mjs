@@ -213,20 +213,21 @@ const fuentesRelieve = {
 const APAGADA = { visibility: "none" };
 
 /** Capas que van bajo las vías (sombra y líneas) y capa de etiquetas, que va arriba. `exageracion`: hillshade. */
-function capasRelieve(exageracion) {
+function capasRelieve(exageracion, claro = false) {
   const debajo = [
     {
       id: "relieve-sombra", type: "hillshade", source: "relieve", layout: { ...APAGADA },
       paint: {
         "hillshade-method": "standard", "hillshade-exaggeration": exageracion,
-        "hillshade-shadow-color": "#000000", "hillshade-highlight-color": "#8a97a8", "hillshade-accent-color": "#000000",
+        "hillshade-shadow-color": claro ? "#3b3b3b" : "#000000", "hillshade-highlight-color": claro ? "#ffffff" : "#8a97a8",
+        "hillshade-accent-color": claro ? "#3b3b3b" : "#000000",
       },
     },
     {
       id: "curvas-linea", type: "line", source: "curvas", "source-layer": "curvas", minzoom: 12,
       filter: ["==", ["get", "indice"], 0], layout: { ...APAGADA, "line-join": "round" },
       paint: {
-        "line-color": "#c9b48f", "line-opacity": 0.35,
+        "line-color": claro ? "#a8895a" : "#c9b48f", "line-opacity": 0.35,
         "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.4, 16, 0.9],
       },
     },
@@ -234,7 +235,7 @@ function capasRelieve(exageracion) {
       id: "curvas-indice", type: "line", source: "curvas", "source-layer": "curvas", minzoom: 11,
       filter: ["==", ["get", "indice"], 1], layout: { ...APAGADA, "line-join": "round" },
       paint: {
-        "line-color": "#c9b48f", "line-opacity": 0.65,
+        "line-color": claro ? "#a8895a" : "#c9b48f", "line-opacity": 0.65,
         "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.6, 16, 1.6],
       },
     },
@@ -246,14 +247,16 @@ function capasRelieve(exageracion) {
       ...APAGADA, "symbol-placement": "line", "symbol-spacing": 300, "text-field": ["to-string", ["get", "ele"]],
       "text-font": ["Noto Sans Regular"], "text-size": 10,
     },
-    paint: { "text-color": "#e6d9bf", "text-halo-color": "#000000", "text-halo-width": 1 },
+    paint: {
+      "text-color": claro ? "#6b5530" : "#e6d9bf", "text-halo-color": claro ? "#ffffff" : "#000000", "text-halo-width": 1,
+    },
   };
   return { debajo, etiqueta };
 }
 
 /** Inserta el relieve justo antes de las vías (tras el agua y los usos del suelo). */
-function conRelieveVectorial(capas) {
-  const { debajo, etiqueta } = capasRelieve(0.4);
+function conRelieveVectorial(capas, claro = false) {
+  const { debajo, etiqueta } = capasRelieve(claro ? 0.3 : 0.4, claro);
   let i = capas.findIndex((c) => c.id.startsWith("roads_tunnels"));
   if (i < 0) i = capas.findIndex((c) => c.id === "buildings");
   if (i < 0) i = 1;
@@ -264,20 +267,30 @@ function conRelieveVectorial(capas) {
 const vectorial = { type: "vector", url: `pmtiles://${DIR}/mallorca.pmtiles`, attribution: OSM };
 // Sprite múltiple (MapLibre Native: soportado desde 2024, mbgl #1858): `default` es el de Protomaps y las placas se
 // piden como «placas:placa-azul».
-const comun = {
+const comunDe = (tema) => ({
   version: 8,
   glyphs: `${DIR}/fuentes/{fontstack}/{range}.pbf`,
   sprite: [
-    { id: "default", url: `${DIR}/sprites/dark` },
+    { id: "default", url: `${DIR}/sprites/${tema}` },
     { id: "placas", url: `${DIR}/sprites/placas` },
   ],
-};
+});
+const comun = comunDe("dark");
 
 const estiloVectorial = {
   ...comun,
   name: "Rally Copilot · vectorial",
   sources: { protomaps: vectorial, ...fuentesRelieve },
   layers: conRelieveVectorial(conPlacas(layers("protomaps", namedFlavor("dark"), { lang: "es" }))),
+};
+
+// Tema claro: mismas fuentes, capas propias (placas, relieve, curvas) y fuentes de texto; solo cambia el flavor y el
+// sprite `default`. La app lo carga de mapa/vectorial-claro.json si existe (las apps viejas lo ignoran).
+const estiloVectorialClaro = {
+  ...comunDe("light"),
+  name: "Rally Copilot · vectorial claro",
+  sources: { protomaps: vectorial, ...fuentesRelieve },
+  layers: conRelieveVectorial(conPlacas(layers("protomaps", namedFlavor("light"), { lang: "es" })), true),
 };
 
 const relieveSatelite = capasRelieve(0.25);
@@ -326,13 +339,15 @@ function validar(estilo) {
   }
 }
 validar(estiloVectorial);
+validar(estiloVectorialClaro);
 validar(estiloSatelite);
 
 await mkdir(join(salida, "sprites"), { recursive: true });
 await writeFile(join(salida, "vectorial.json"), JSON.stringify(estiloVectorial));
+await writeFile(join(salida, "vectorial-claro.json"), JSON.stringify(estiloVectorialClaro));
 await writeFile(join(salida, "satelite.json"), JSON.stringify(estiloSatelite));
 
-for (const nombre of ["dark.json", "dark.png", "dark@2x.json", "dark@2x.png"]) {
+for (const nombre of ["dark", "light"].flatMap((t) => [`${t}.json`, `${t}.png`, `${t}@2x.json`, `${t}@2x.png`])) {
   await bajar(`${ASSETS}/sprites/v4/${nombre}`, join(salida, "sprites", nombre));
 }
 for (const [escala, sufijo] of [[1, ""], [2, "@2x"]]) {
@@ -340,7 +355,7 @@ for (const [escala, sufijo] of [[1, ""], [2, "@2x"]]) {
   await writeFile(join(salida, "sprites", `placas${sufijo}.png`), codificarPng(ancho, alto, rgba));
   await writeFile(join(salida, "sprites", `placas${sufijo}.json`), JSON.stringify(json));
 }
-const usadas = new Set([...fuentes(estiloVectorial), ...fuentes(estiloSatelite)]);
+const usadas = new Set([...fuentes(estiloVectorial), ...fuentes(estiloVectorialClaro), ...fuentes(estiloSatelite)]);
 for (const fuente of usadas) {
   await mkdir(join(salida, "fuentes", fuente), { recursive: true });
   for (const rango of RANGOS) {
@@ -348,4 +363,4 @@ for (const fuente of usadas) {
   }
 }
 await bajar(`${ASSETS}/fonts/OFL.txt`, join(salida, "fuentes", "OFL.txt"));
-console.log(`estilos: vectorial (${estiloVectorial.layers.length} capas), satélite (${estiloSatelite.layers.length}); fuentes: ${[...usadas].join(", ")}`);
+console.log(`estilos: vectorial (${estiloVectorial.layers.length} capas), claro (${estiloVectorialClaro.layers.length}), satélite (${estiloSatelite.layers.length}); fuentes: ${[...usadas].join(", ")}`);
