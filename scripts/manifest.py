@@ -2,10 +2,11 @@
 
 Uso: python -I scripts/manifest.py --carpeta salida --version 2026.10.28-1 --tag datos-2026.10.28-1 \
          --repo trombonet12/rally-copilot-data [--version-satelite 2026.10.28-1] [--version-z17 2026.11.01-1]
+         [--version-vectorial 2026.10.28-1]
 
 La app lee https://github.com/<repo>/releases/latest/download/manifest.json y baja solo los archivos cuyo SHA-256
 no coincide con el que ya tiene. Los archivos opcionales (OPCIONALES) que no existan en la carpeta no se incluyen. `version` de cada archivo = release en la que se generó (el satélite se reutiliza
-entre releases y conserva la suya).
+entre releases y conserva la suya; el vectorial, si se reutiliza de la ultima release, tambien).
 
 Los archivos de SEPARADOS (satélite z17) NO van en manifest.json sino en manifest-extra.json (mismo esquema, mismo
 formato de entrada): las apps ya instaladas descargan TODO lo que lista manifest.json (no ignoran ids desconocidos) y un
@@ -72,9 +73,9 @@ def _entradas(carpeta: str, version: str, tag: str, repo: str, versiones: dict[s
 
 
 def construir(carpeta: str, version: str, tag: str, repo: str, version_satelite: str | None, ahora: str,
-              version_z17: str | None = None, separados: bool = False) -> dict:
+              version_z17: str | None = None, separados: bool = False, version_vectorial: str | None = None) -> dict:
     """manifest.json (separados=False) o manifest-extra.json (separados=True)."""
-    versiones = {"satelite": version_satelite, "satelite-z17": version_z17}
+    versiones = {"satelite": version_satelite, "satelite-z17": version_z17, "vectorial": version_vectorial}
     archivos = _entradas(carpeta, version, tag, repo, versiones, separados)
     return {"esquema": ESQUEMA, "version": version, "generado": ahora, "archivos": archivos}
 
@@ -87,11 +88,13 @@ def main() -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--version-satelite")
     p.add_argument("--version-z17")
+    p.add_argument("--version-vectorial")
     args = p.parse_args()
     ahora = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    manifest = construir(args.carpeta, args.version, args.tag, args.repo, args.version_satelite, ahora, args.version_z17)
+    manifest = construir(args.carpeta, args.version, args.tag, args.repo, args.version_satelite, ahora, args.version_z17,
+                         version_vectorial=args.version_vectorial)
     extra = construir(args.carpeta, args.version, args.tag, args.repo, args.version_satelite, ahora, args.version_z17,
-                      separados=True)
+                      separados=True, version_vectorial=args.version_vectorial)
     for nombre, contenido in (("manifest.json", manifest), (NOMBRE_EXTRA, extra)):
         if nombre == NOMBRE_EXTRA and not contenido["archivos"]:
             continue

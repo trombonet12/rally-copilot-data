@@ -11,6 +11,9 @@ name: Datos Mallorca
 #   publicar     (contents: write) -> unico job con GH_TOKEN de escritura: manifest, comprobaciones, release y retencion.
 # El z17 (`pnoa-mallorca-z17.pmtiles`) NO va en manifest.json sino en manifest-extra.json: las apps ya instaladas
 # descargan todo lo que lista manifest.json y no ignoran ids desconocidos. Un fallo del z17 no bloquea la release.
+# El mapa vectorial (mallorca.pmtiles) tambien se puede reutilizar de la ultima release (input `reutilizar_vectorial`, y
+# automaticamente si osmdata.openstreetmap.de no deja bajar los poligonos de agua/tierra que necesita Planetiler): en
+# ese caso `publicar` lo baja de la release y lo verifica contra su manifest, igual que el satelite.
 # La decision del satelite va en un job previo (y no en build con la API publica sin autenticar) porque la API anonima
 # tiene un limite de 60 peticiones/hora por IP, compartido con otros runners, y fallaria al azar.
 on:
@@ -20,6 +23,10 @@ on:
     inputs:
       satelite:
         description: 'Regenerar el satelite PNOA z16 y z17 (si no, se reutilizan los de la ultima release)'
+        type: boolean
+        default: false
+      reutilizar_vectorial:
+        description: 'No ejecutar Planetiler: reutilizar el mapa vectorial (mallorca.pmtiles) de la ultima release'
         type: boolean
         default: false
 
@@ -111,9 +118,12 @@ jobs:
     defaults:
       run:
         shell: bash
+    outputs:
+      reutilizar_vectorial: ${{ steps.vec.outputs.reutilizar }}
     env:
       # Sin GH_TOKEN en ningun paso de este job: ejecuta Maven/Planetiler, npm y pip.
       VERSION: ${{ needs.decidir.outputs.version }}
+      REUTILIZAR_INPUT: ${{ inputs.reutilizar_vectorial }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,7 +193,93 @@ jobs:
           python -I scripts/radares.py --pbf trabajo/data/sources/mallorca.osm.pbf "${dgt[@]}"             --salida salida/radares-mallorca.tsv
           head -c 600 salida/radares-mallorca.tsv
 
+      # Planetiler (protomaps/basemaps) baja de osmdata.openstreetmap.de los poligonos de agua y de tierra; si ese
+      # servidor cae, el job fallaba siempre. Se cachean (clave mensual; restore-keys admite una anterior) y se bajan con
+      # reintentos a trabajo/data/sources, donde Planetiler los toma sin volver a descargarlos. Si no hay forma de
+      # tenerlos, se reutiliza el mapa vectorial de la ultima release (con aviso) en vez de fallar.
+      - name: Poligonos de agua y tierra - mes
+        id: mes
+        if: env.REUTILIZAR_INPUT != 'true'
+        run: echo "mes=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Poligonos de agua y tierra - cache
+        id: cache
+        if: env.REUTILIZAR_INPUT != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            trabajo/data/sources/water-polygons-split-3857.zip
+            trabajo/data/sources/land-polygons-split-3857.zip
+          key: osmdata-poligonos-${{ steps.mes.outputs.mes }}
+          restore-keys: osmdata-poligonos-
+
+      - name: Poligonos de agua y tierra - descarga con reintentos
+        id: fuentes
+        if: env.REUTILIZAR_INPUT != 'true'
+        timeout-minutes: 60
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          set -uo pipefail
+          dir=trabajo/data/sources
+          base=https://osmdata.openstreetmap.de/download
+          ok=true
+          guardar=false
+          for f in water-polygons-split-3857.zip land-polygons-split-3857.zip; do
+            if [ "$CACHE_HIT" = "true" ] && [ -f "$dir/$f" ]; then
+              echo "$f: de la cache"
+              continue
+            fi
+            if curl -fsSL --retry 5 --retry-delay 30 --retry-all-errors --connect-timeout 30 \
+                 --speed-limit 10000 --speed-time 60 -o "$dir/$f.tmp" "$base/$f" \
+              && unzip -tq "$dir/$f.tmp" > /dev/null; then
+              mv -f "$dir/$f.tmp" "$dir/$f"
+              guardar=true
+              echo "$f: descargado"
+            else
+              rm -f "$dir/$f.tmp"
+              if [ -f "$dir/$f" ]; then
+                echo "::warning::No se pudo descargar $f de osmdata.openstreetmap.de: se usa la copia de una cache anterior"
+              else
+                echo "::warning::No se pudo descargar $f de osmdata.openstreetmap.de y no hay cache previa"
+                ok=false
+                break
+              fi
+            fi
+          done
+          {
+            echo "ok=$ok"
+            echo "guardar=$guardar"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Poligonos de agua y tierra - guardar en la cache
+        if: steps.fuentes.outputs.ok == 'true' && steps.fuentes.outputs.guardar == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            trabajo/data/sources/water-polygons-split-3857.zip
+            trabajo/data/sources/land-polygons-split-3857.zip
+          key: osmdata-poligonos-${{ steps.mes.outputs.mes }}
+
+      # reutilizar=true: no se ejecuta Planetiler y `publicar` toma mallorca.pmtiles de la ultima release.
+      - name: Mapa vectorial - generar o reutilizar
+        id: vec
+        env:
+          FUENTES_OK: ${{ steps.fuentes.outputs.ok }}
+        run: |
+          set -euo pipefail
+          reutilizar=false
+          if [ "$REUTILIZAR_INPUT" = "true" ]; then
+            reutilizar=true
+            echo "Mapa vectorial: se reutiliza el de la ultima release (input reutilizar_vectorial)"
+          elif [ "$FUENTES_OK" != "true" ]; then
+            reutilizar=true
+            echo "::warning::Sin poligonos de agua/tierra de osmdata.openstreetmap.de: se reutiliza el mapa vectorial de la ultima release"
+          fi
+          echo "reutilizar=$reutilizar" >> "$GITHUB_OUTPUT"
+
       - name: Planetiler (protomaps/basemaps) y mapa vectorial
+        if: steps.vec.outputs.reutilizar != 'true'
         run: |
           set -euo pipefail
           mkdir -p trabajo/basemaps
@@ -381,6 +477,7 @@ jobs:
       TAG: ${{ needs.decidir.outputs.tag }}
       REGENERAR: ${{ needs.decidir.outputs.regenerar }}
       REGENERAR_Z17: ${{ needs.decidir.outputs.regenerar_z17 }}
+      REUTILIZAR_VECTORIAL: ${{ needs.build.outputs.reutilizar_vectorial }}
       Z17_RESULT: ${{ needs.satelite_z17.result }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -409,6 +506,30 @@ jobs:
           mv previo/pnoa-mallorca-z16.pmtiles salida/pnoa-mallorca-z16.pmtiles
           echo "VERSION_SAT=$version_sat" >> "$GITHUB_ENV"
           echo "Satelite reutilizado (version $version_sat)"
+
+      # Sin Planetiler (input o servidor de osmdata caido): mallorca.pmtiles viene de la ultima release y debe coincidir
+      # con el SHA-256 que su manifest declara para el id `vectorial`. Conserva la version con la que se genero.
+      - name: Mapa vectorial - reutilizar el de la ultima release
+        if: env.REUTILIZAR_VECTORIAL == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p previo-vec
+          gh release download --repo "$GITHUB_REPOSITORY" --dir previo-vec --clobber \
+            --pattern 'mallorca.pmtiles' --pattern 'manifest.json'
+          version_vec="$(jq -r '.archivos[] | select(.id == "vectorial") | .version // empty' previo-vec/manifest.json)"
+          sha_vec="$(jq -r '.archivos[] | select(.id == "vectorial") | .sha256 // empty' previo-vec/manifest.json)"
+          if [ -z "$version_vec" ] || ! printf '%s' "$sha_vec" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error::El manifest previo no trae version y sha256 validos del mapa vectorial"
+            exit 1
+          fi
+          (cd previo-vec && echo "${sha_vec}  mallorca.pmtiles" | sha256sum -c -)
+          mv previo-vec/mallorca.pmtiles salida/mallorca.pmtiles
+          echo "VERSION_VEC=$version_vec" >> "$GITHUB_ENV"
+          echo "Mapa vectorial reutilizado (version $version_vec)"
+
+      - name: Mapa vectorial - version regenerada
+        if: env.REUTILIZAR_VECTORIAL != 'true'
+        run: echo "VERSION_VEC=$VERSION" >> "$GITHUB_ENV"
 
       - name: Satelite - version regenerada
         if: env.REGENERAR == 'true'
@@ -458,7 +579,8 @@ jobs:
           extra=()
           if [ -n "${VERSION_Z17:-}" ]; then extra=(--version-z17 "$VERSION_Z17"); fi
           python3 -I scripts/manifest.py --carpeta salida --version "$VERSION" --tag "$TAG" \
-            --repo "$GITHUB_REPOSITORY" --version-satelite "$VERSION_SAT" "${extra[@]}"
+            --repo "$GITHUB_REPOSITORY" --version-satelite "$VERSION_SAT" \
+            --version-vectorial "$VERSION_VEC" "${extra[@]}"
           # Limite de GitHub: 2 GiB por asset.
           for f in salida/*; do
             bytes="$(stat -c %s "$f")"
@@ -474,7 +596,7 @@ jobs:
           set -euo pipefail
           mkdir -p trabajo
           {
-            echo "Datos offline de Mallorca para Rally Copilot (versión $VERSION; satélite $VERSION_SAT)."
+            echo "Datos offline de Mallorca para Rally Copilot (versión $VERSION; satélite $VERSION_SAT; mapa vectorial $VERSION_VEC)."
             echo
             echo "Archivos:"
             jq -r '.archivos[] | "- `\(.nombre)`: \((.bytes / 1048576 | floor)) MiB (versión \(.version))"' salida/manifest.json

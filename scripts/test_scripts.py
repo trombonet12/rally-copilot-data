@@ -160,6 +160,23 @@ class ManifestTest(unittest.TestCase):
         sat = next(a for a in principal["archivos"] if a["id"] == "satelite")
         self.assertEqual(sat["version"], "2026.10.01-1")
 
+    def test_vectorial_reutilizado_conserva_su_version(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            for a in manifest.ARCHIVOS:
+                if a["id"] in manifest.OPCIONALES:
+                    continue
+                with open(os.path.join(carpeta, a["nombre"]), "wb") as f:
+                    f.write(b"abc")
+            nuevo = manifest.construir(carpeta, "2026.11.06-1", "datos-2026.11.06-1", "o/r", "2026.10.01-1", "T")
+            reutil = manifest.construir(carpeta, "2026.11.06-1", "datos-2026.11.06-1", "o/r", "2026.10.01-1", "T",
+                                        version_vectorial="2026.11.01-2")
+        vec = {a["id"]: a for a in nuevo["archivos"]}["vectorial"]
+        self.assertEqual(vec["version"], "2026.11.06-1")
+        vec = {a["id"]: a for a in reutil["archivos"]}["vectorial"]
+        self.assertEqual(vec["version"], "2026.11.01-2")
+        self.assertEqual(vec["nombre"], "mallorca.pmtiles")
+        self.assertEqual(vec["url"], "https://github.com/o/r/releases/download/datos-2026.11.06-1/mallorca.pmtiles")
+
     def test_radares_va_en_manifest_json_como_opcional_con_su_atribucion(self):
         with tempfile.TemporaryDirectory() as carpeta:
             for a in manifest.ARCHIVOS:
