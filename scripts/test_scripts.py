@@ -294,6 +294,10 @@ class ViasNotasTest(unittest.TestCase):
         linea = "42\tprimary\t90\t\t\tyes\tMa-10\tCarretera\t39000000,3000000;39001000,3000500\n"
         self.assertEqual(vias_notas.leer_via(linea), ("42", [(39_000_000, 3_000_000), (39_001_000, 3_000_500)]))
 
+    def test_lectura_de_via_con_junction_bridge_tunnel_layer(self):
+        linea = "42\tprimary\t90\t\t\tyes\tMa-10\tCarretera\t\tyes\t\t1\t39000000,3000000;39001000,3000500\n"
+        self.assertEqual(vias_notas.leer_via(linea), ("42", [(39_000_000, 3_000_000), (39_001_000, 3_000_500)]))
+
     def test_bilineal(self):
         valores = {(0, 0): 0.0, (1, 0): 10.0, (0, 1): 20.0, (1, 1): 30.0}
         pixel = lambda c, f: valores[(c, f)]  # noqa: E731

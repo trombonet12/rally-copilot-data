@@ -89,7 +89,8 @@ def leer_via(linea):
     """Línea de vias-mallorca.tsv.gz -> (id, [(lat_e6, lon_e6), ...])."""
     c = linea.rstrip("\n").split("\t")
     puntos = []
-    for p in c[8].split(";"):
+    # Las coordenadas van siempre en el último campo (9 campos en el formato antiguo, 13 con junction/bridge/tunnel/layer).
+    for p in c[-1].split(";"):
         lat, lon = p.split(",")
         puntos.append((int(lat), int(lon)))
     return c[0], puntos

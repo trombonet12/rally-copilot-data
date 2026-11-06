@@ -3,8 +3,10 @@
 Uso: python -I scripts/vias.py mallorca.osm.pbf vias-mallorca.tsv.gz
 
 Formato (v1, lo lee `LectorVias` del motor de Rally Copilot), una vía por línea, campos separados por tabulador:
-  id  highway  maxspeed  maxspeed:forward  maxspeed:backward  oneway  ref  name  coordenadas
+  id  highway  maxspeed  maxspeed:forward  maxspeed:backward  oneway  ref  name  junction  bridge  tunnel  layer  coordenadas
 Las coordenadas son «lat,lon;lat,lon;…» en millonésimas de grado (enteros). Campos vacíos si OSM no los tiene.
+`junction` (roundabout...), `bridge`, `tunnel` y `layer` identifican las rotondas y los pasos a distinto nivel. Compatibilidad:
+el lector admite también líneas antiguas de 9 campos (sin esos cuatro, que van antes de las coordenadas).
 La primera línea es la cabecera `#vias-mallorca v1`. Datos © OpenStreetMap contributors (ODbL).
 """
 
@@ -20,7 +22,10 @@ CLASES = {
     "unclassified", "residential", "living_street", "road",
 }
 CABECERA = "#vias-mallorca v1"
-ETIQUETAS = ("maxspeed", "maxspeed:forward", "maxspeed:backward", "oneway", "ref", "name")
+ETIQUETAS = (
+    "maxspeed", "maxspeed:forward", "maxspeed:backward", "oneway", "ref", "name",
+    "junction", "bridge", "tunnel", "layer",
+)
 
 
 def limpio(valor: str | None) -> str:
