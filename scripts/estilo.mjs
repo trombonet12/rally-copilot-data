@@ -223,32 +223,26 @@ function capasRelieve(exageracion, claro = false) {
         "hillshade-accent-color": claro ? "#3b3b3b" : "#000000",
       },
     },
+    // Solo una curva cada 100 m, tenue y de cerca: con todas (cada 10 m) la montaña saturaba y tapaba la carretera
+    // (Joan, 2026-11-07). La carretera va siempre por encima.
     {
-      id: "curvas-linea", type: "line", source: "curvas", "source-layer": "curvas", minzoom: 12,
-      filter: ["==", ["get", "indice"], 0], layout: { ...APAGADA, "line-join": "round" },
+      id: "curvas-indice", type: "line", source: "curvas", "source-layer": "curvas", minzoom: 13,
+      filter: ["==", ["%", ["get", "ele"], 100], 0], layout: { ...APAGADA, "line-join": "round" },
       paint: {
-        "line-color": claro ? "#a8895a" : "#c9b48f", "line-opacity": 0.35,
-        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.4, 16, 0.9],
-      },
-    },
-    {
-      id: "curvas-indice", type: "line", source: "curvas", "source-layer": "curvas", minzoom: 11,
-      filter: ["==", ["get", "indice"], 1], layout: { ...APAGADA, "line-join": "round" },
-      paint: {
-        "line-color": claro ? "#a8895a" : "#c9b48f", "line-opacity": 0.65,
-        "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.6, 16, 1.6],
+        "line-color": claro ? "#a8895a" : "#c9b48f", "line-opacity": 0.3,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 13, 0.4, 16, 0.9],
       },
     },
   ];
   const etiqueta = {
-    id: "curvas-etiqueta", type: "symbol", source: "curvas", "source-layer": "curvas", minzoom: 13,
-    filter: ["==", ["get", "indice"], 1],
+    id: "curvas-etiqueta", type: "symbol", source: "curvas", "source-layer": "curvas", minzoom: 15,
+    filter: ["==", ["%", ["get", "ele"], 100], 0],
     layout: {
-      ...APAGADA, "symbol-placement": "line", "symbol-spacing": 300, "text-field": ["to-string", ["get", "ele"]],
+      ...APAGADA, "symbol-placement": "line", "symbol-spacing": 500, "text-field": ["to-string", ["get", "ele"]],
       "text-font": ["Noto Sans Regular"], "text-size": 10,
     },
     paint: {
-      "text-color": claro ? "#6b5530" : "#e6d9bf", "text-halo-color": claro ? "#ffffff" : "#000000", "text-halo-width": 1,
+      "text-color": claro ? "#8a7550" : "#b8ab92", "text-halo-color": claro ? "#ffffff" : "#000000", "text-halo-width": 1,
     },
   };
   return { debajo, etiqueta };
@@ -256,7 +250,7 @@ function capasRelieve(exageracion, claro = false) {
 
 /** Inserta el relieve justo antes de las vías (tras el agua y los usos del suelo). */
 function conRelieveVectorial(capas, claro = false) {
-  const { debajo, etiqueta } = capasRelieve(claro ? 0.3 : 0.4, claro);
+  const { debajo, etiqueta } = capasRelieve(claro ? 0.22 : 0.3, claro);
   let i = capas.findIndex((c) => c.id.startsWith("roads_tunnels"));
   if (i < 0) i = capas.findIndex((c) => c.id === "buildings");
   if (i < 0) i = 1;
