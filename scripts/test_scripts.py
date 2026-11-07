@@ -123,7 +123,8 @@ class ManifestTest(unittest.TestCase):
             con = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", None, "T")
         self.assertEqual(
             manifest.OPCIONALES,
-            {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "satelite-z17"})
+            {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "satelite-z17", "voz-sharvard",
+             "voz-sharvard-tokens"})
         self.assertTrue({"busqueda", "relieve", "curvas"}.isdisjoint({a["id"] for a in sin["archivos"]}))
         por_id = {a["id"]: a for a in con["archivos"]}
         self.assertEqual(por_id["busqueda"]["atribucion"], "© OpenStreetMap contributors")

@@ -20,6 +20,7 @@ release y solo baja los que han cambiado.
 | `curvas-mallorca.pmtiles` | Curvas de nivel cada 10 m (capa `curvas`, z11–14; atributos `ele` e `indice` = 1 cada 50 m). Opcional (`id` `curvas`) | MDT05, IGN |
 | `vias-notas-mallorca.tsv.gz` | Etiquetas de vías y nodos de OSM y perfil de altura (5 m) de cada vía, para las notas de rally (formato `#vias-notas v1`, ver abajo). Opcional (`id` `vias-notas`) | OpenStreetMap, MDT05 (IGN) |
 | `radares-mallorca.tsv` | Radares fijos, de tramo y zonas de radar móvil (formato `#radares v1`, ver abajo; pocos KB). Opcional (`id` `radares`) y **en `manifest.json`**, no en el extra | DGT (NAP), OpenStreetMap, informe de cinemómetros de la DGT |
+| `voz-sharvard.onnx` y `voz-sharvard-tokens.txt` | Voz Sharvard (Piper es_ES, int8, 22 050 Hz, 21 MB): el modelo y sus tokens, sacados del paquete oficial de sherpa-onnx (`scripts/voz.py`, SHA-256 fijado). Rally Copilot no la empaqueta: la baja al elegirla. Opcionales (`id` `voz-sharvard` y `voz-sharvard-tokens`) y **en `manifest.json`** | Harvard sentences, Univ. de Edimburgo (CC BY 3.0); Piper |
 | `manifest.json` | Índice: versión, tamaño, SHA-256, URL y atribución de cada archivo | Generado |
 | `manifest-extra.json` | Mismo formato que `manifest.json`, solo con los archivos opcionales que las apps ya instaladas no deben bajar (hoy `satelite-z17`). Se omite si no hay ninguno | Generado |
 
@@ -226,6 +227,7 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 - `scripts/satelite.py`: descarga las teselas PNOA entre `--zmin` (0 por defecto) y `--zmax` a un MBTiles (reanudable; anota las teselas de mar en la tabla `sin_cobertura` para no repetirlas).
 - `scripts/estilo.mjs`: genera estilos (con relieve, curvas y placas), sprites y fuentes (dependencia npm en `estilo/`).
 - `scripts/valhalla.sh`: genera `valhalla-mallorca.tar` con la imagen Docker oficial de Valhalla.
+- `scripts/voz.py`: baja el paquete de la voz Sharvard de sherpa-onnx, verifica su SHA-256 y publica solo `voz-sharvard.onnx` y `voz-sharvard-tokens.txt`.
 - `scripts/manifest.py`: escribe `manifest.json` y, si hay archivos separados (z17), `manifest-extra.json` (los opcionales ausentes se omiten).
 - `scripts/test_scripts.py`: pruebas sin red (`python -I -m unittest discover -s scripts -p 'test_*.py'`).
 

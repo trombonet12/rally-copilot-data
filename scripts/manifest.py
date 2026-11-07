@@ -11,6 +11,9 @@ entre releases y conserva la suya; el vectorial, si se reutiliza de la ultima re
 Los archivos de SEPARADOS (satélite z17) NO van en manifest.json sino en manifest-extra.json (mismo esquema, mismo
 formato de entrada): las apps ya instaladas descargan TODO lo que lista manifest.json (no ignoran ids desconocidos) y un
 z17 de ~1 GB les rompería la actualización por el límite de espacio. Solo una app que lo pida lee manifest-extra.json.
+
+La voz Sharvard (`voz-sharvard` y `voz-sharvard-tokens`, ~21 MB) sí va en manifest.json: la app nueva no la empaqueta y
+la baja al elegirla (ids bajo demanda); una app vieja que la descargue de más solo gasta 21 MB una vez.
 """
 
 import argparse
@@ -38,9 +41,17 @@ ARCHIVOS = [
      "licencia": "CC-BY, ODbL-1.0"},
     {"id": "satelite-z17", "nombre": "pnoa-mallorca-z17.pmtiles", "atribucion": "PNOA CC-BY 4.0 scne.es",
      "licencia": "CC-BY-4.0"},
+    # Voz Sharvard (Piper es_ES int8): no va en el APK, la app la baja al elegirla (scripts/voz.py).
+    {"id": "voz-sharvard", "nombre": "voz-sharvard.onnx",
+     "atribucion": "Voz Sharvard: Harvard sentences, Univ. de Edimburgo (CC BY 3.0); Piper/sherpa-onnx",
+     "licencia": "CC-BY-3.0"},
+    {"id": "voz-sharvard-tokens", "nombre": "voz-sharvard-tokens.txt",
+     "atribucion": "Voz Sharvard: Harvard sentences, Univ. de Edimburgo (CC BY 3.0); Piper/sherpa-onnx",
+     "licencia": "CC-BY-3.0"},
 ]
 # Archivos que se omiten del manifest si no estan en la carpeta (la app actual solo exige los demas).
-OPCIONALES = {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "satelite-z17"}
+OPCIONALES = {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "satelite-z17",
+              "voz-sharvard", "voz-sharvard-tokens"}
 # Opcionales que van en manifest-extra.json y nunca en manifest.json (ver la docstring del modulo).
 SEPARADOS = {"satelite-z17"}
 NOMBRE_EXTRA = "manifest-extra.json"

@@ -1,7 +1,7 @@
 name: Datos Mallorca
 
 # Genera los datos offline de Mallorca (mapa vectorial, estilo, vias, indice de busqueda, relieve y curvas de nivel
-# del MDT05, teselas de enrutado Valhalla, radares DGT+OSM y, si toca, satelite PNOA z16 y z17) y los publica en una GitHub Release
+# del MDT05, teselas de enrutado Valhalla, radares DGT+OSM, voz Sharvard y, si toca, satelite PNOA z16 y z17) y los publica en una GitHub Release
 # `datos-<AAAA.MM.DD>-<run>`. La app lee releases/latest/download/manifest.json.
 #
 # Cuatro jobs para que el codigo de terceros (Maven/Planetiler, npm, pip) nunca vea un token con escritura:
@@ -360,6 +360,11 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node estilo.mjs "$GITHUB_WORKSPACE/trabajo/estilo-mapa" "$ASSETS_SHA"
           (cd "$GITHUB_WORKSPACE/trabajo/estilo-mapa" && zip -r -q "$GITHUB_WORKSPACE/salida/estilo-mapa.zip" .)
+
+      # Voz Sharvard (Piper es_ES int8): ya no va en el APK, la app la baja de la release al elegirla. El paquete se baja
+      # de sherpa-onnx con su SHA-256 fijado en scripts/voz.py y solo se publican el modelo y los tokens (~21 MB).
+      - name: Voz Sharvard (modelo y tokens)
+        run: python -I scripts/voz.py --salida salida
 
       - name: Satelite - descargar PNOA y convertir
         if: needs.decidir.outputs.regenerar == 'true'
