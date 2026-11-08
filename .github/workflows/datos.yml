@@ -193,6 +193,15 @@ jobs:
           python -I scripts/radares.py --pbf trabajo/data/sources/mallorca.osm.pbf "${dgt[@]}"             --salida salida/radares-mallorca.tsv
           head -c 600 salida/radares-mallorca.tsv
 
+      # Hitos kilometricos (highway=milestone de OSM) -> TSV de pocos KB (id `pk`, opcional, en manifest.json). La app lo usa
+      # para decir «Ma-10, kilometro veintitres» en «donde estoy». Falla el job si salen menos de 20 hitos o alguno fuera
+      # del bbox (cambio de etiquetado en OSM), igual que los radares.
+      - name: Hitos kilometricos (OSM)
+        run: |
+          set -euo pipefail
+          python -I scripts/pk.py --pbf trabajo/data/sources/mallorca.osm.pbf --salida salida/pk-mallorca.tsv
+          head -c 400 salida/pk-mallorca.tsv
+
       # Planetiler (protomaps/basemaps) baja de osmdata.openstreetmap.de los poligonos de agua y de tierra; si ese
       # servidor cae, el job fallaba siempre. Se cachean (clave mensual; restore-keys admite una anterior) y se bajan con
       # reintentos a trabajo/data/sources, donde Planetiler los toma sin volver a descargarlos. Si no hay forma de

@@ -39,6 +39,7 @@ ARCHIVOS = [
      "atribucion": "© OpenStreetMap contributors; MDT05 CC-BY 4.0 scne.es", "licencia": "ODbL-1.0, CC-BY-4.0"},
     {"id": "radares", "nombre": "radares-mallorca.tsv", "atribucion": "DGT (CC BY); © OpenStreetMap contributors",
      "licencia": "CC-BY, ODbL-1.0"},
+    {"id": "pk", "nombre": "pk-mallorca.tsv", "atribucion": "© OpenStreetMap contributors", "licencia": "ODbL-1.0"},
     {"id": "satelite-z17", "nombre": "pnoa-mallorca-z17.pmtiles", "atribucion": "PNOA CC-BY 4.0 scne.es",
      "licencia": "CC-BY-4.0"},
     # Voz Sharvard (Piper es_ES int8): no va en el APK, la app la baja al elegirla (scripts/voz.py).
@@ -50,7 +51,7 @@ ARCHIVOS = [
      "licencia": "CC-BY-3.0"},
 ]
 # Archivos que se omiten del manifest si no estan en la carpeta (la app actual solo exige los demas).
-OPCIONALES = {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "satelite-z17",
+OPCIONALES = {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "pk", "satelite-z17",
               "voz-sharvard", "voz-sharvard-tokens"}
 # Opcionales que van en manifest-extra.json y nunca en manifest.json (ver la docstring del modulo).
 SEPARADOS = {"satelite-z17"}

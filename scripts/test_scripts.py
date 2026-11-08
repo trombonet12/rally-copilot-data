@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import busqueda  # noqa: E402
 import manifest  # noqa: E402
+import pk  # noqa: E402
 import radares  # noqa: E402
 import satelite  # noqa: E402
 import vias_notas  # noqa: E402
@@ -123,8 +124,8 @@ class ManifestTest(unittest.TestCase):
             con = manifest.construir(carpeta, "2026.10.28-1", "datos-2026.10.28-1", "o/r", None, "T")
         self.assertEqual(
             manifest.OPCIONALES,
-            {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "satelite-z17", "voz-sharvard",
-             "voz-sharvard-tokens"})
+            {"valhalla", "busqueda", "relieve", "curvas", "vias-notas", "radares", "pk", "satelite-z17",
+             "voz-sharvard", "voz-sharvard-tokens"})
         self.assertTrue({"busqueda", "relieve", "curvas"}.isdisjoint({a["id"] for a in sin["archivos"]}))
         por_id = {a["id"]: a for a in con["archivos"]}
         self.assertEqual(por_id["busqueda"]["atribucion"], "© OpenStreetMap contributors")
@@ -805,6 +806,113 @@ class PbfSinteticoBusquedaTest(unittest.TestCase):
                 self.assertEqual(buscar("colom"), ["Colom", "Forn Colom", "Carrer de Colom"])
             finally:
                 con.close()
+
+
+class PkTest(unittest.TestCase):
+    def test_parsea_el_kilometro(self):
+        casos = {"23": 23.0, "44.8": 44.8, "23,5": 23.5, " 7 km ": 7.0, "12 KM": 12.0, "0": 0.0}
+        for texto, esperado in casos.items():
+            self.assertEqual(pk.parsear_km(texto), esperado, texto)
+        for texto in (None, "", "km 5", "3 mi", "abc", "401", "-2", "1.2.3", "12 m"):
+            self.assertIsNone(pk.parsear_km(texto), texto)
+
+    def test_parsea_las_refs(self):
+        self.assertEqual(pk.parsear_refs("Ma-13;Ma-13A"), ["Ma-13", "Ma-13A"])
+        self.assertEqual(pk.parsear_refs(" Ma-1C "), ["Ma-1C"])
+        self.assertEqual(pk.parsear_refs("Ma-13;Ma-13"), ["Ma-13"])
+        self.assertEqual(pk.parsear_refs("12"), [])  # solo la numeracion del hito
+        self.assertEqual(pk.parsear_refs(None), [])
+
+    def test_hito_de_un_nodo(self):
+        tags = {"highway": "milestone", "distance": "18", "ref": "Ma-19"}
+        self.assertEqual(pk.hitos_de_nodo(tags, 39.5, 2.9), [{"ref": "Ma-19", "km": 18.0, "lat": 39.5, "lon": 2.9}])
+        # `pk` sirve si no hay `distance`; con las dos manda `distance`
+        self.assertEqual(pk.hitos_de_nodo({"highway": "milestone", "pk": "4", "ref": "Ma-1"}, 39.5, 2.9)[0]["km"], 4.0)
+        self.assertEqual(pk.hitos_de_nodo({**tags, "pk": "9"}, 39.5, 2.9)[0]["km"], 18.0)
+        # dos carreteras = dos filas
+        self.assertEqual(len(pk.hitos_de_nodo({**tags, "ref": "Ma-13;Ma-13A"}, 39.5, 2.9)), 2)
+
+    def test_descarta_nodos_sin_carretera_o_sin_km(self):
+        self.assertEqual(pk.hitos_de_nodo({"highway": "milestone", "name": "km 5"}, 39.5, 2.9), [])
+        self.assertEqual(pk.hitos_de_nodo({"highway": "milestone", "ref": "Ma-1C"}, 39.5, 2.9), [])
+        self.assertEqual(pk.hitos_de_nodo({"highway": "milestone", "distance": "5"}, 39.5, 2.9), [])
+        self.assertEqual(pk.hitos_de_nodo({"highway": "bus_stop", "distance": "5", "ref": "Ma-1"}, 39.5, 2.9), [])
+
+    def test_deduplica_el_mismo_hito_cercano_pero_no_otra_ref_ni_otro_km(self):
+        base = {"ref": "Ma-13", "km": 5.0, "lat": 39.7, "lon": 2.9}
+        cerca = {**base, "lat": 39.70005}  # ~5 m
+        lejos = {**base, "lat": 39.701}  # ~110 m
+        unicos = pk.deduplicar([base, cerca, lejos, {**base, "ref": "Ma-1"}, {**base, "km": 6.0}])
+        self.assertEqual(len(unicos), 4)
+
+    def test_validacion(self):
+        hitos = [{"ref": "Ma-1", "km": float(i), "lat": 39.5, "lon": 2.6} for i in range(20)]
+        self.assertEqual(pk.validar(hitos), [])
+        self.assertIn("solo 19 hitos", pk.validar(hitos[:19])[0])
+        errores = pk.validar(hitos + [{"ref": "Ma-1", "km": 30.0, "lat": 41.6, "lon": -0.9}])
+        self.assertEqual(len(errores), 1)
+        self.assertIn("fuera del bbox", errores[0])
+
+    def test_escribe_el_formato_v1_en_orden_natural(self):
+        hitos = [
+            {"ref": "Ma-10", "km": 23.0, "lat": 39.7, "lon": 2.7},
+            {"ref": "Ma-2", "km": 1.5, "lat": 39.6, "lon": 2.6},
+            {"ref": "Ma-10", "km": 4.0, "lat": 39.75, "lon": 2.75},
+            {"ref": "Ma-1C", "km": 44.8, "lat": 39.5123456, "lon": 2.9},
+        ]
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = os.path.join(carpeta, "pk.tsv")
+            pk.escribir(hitos, ruta)
+            with open(ruta, encoding="utf-8", newline="") as f:
+                texto = f.read()
+        self.assertEqual(texto.split("\n"), [
+            "#pk v1",
+            "#ref\tkm\tlat\tlon",
+            "Ma-1C\t44.8\t39.512346\t2.900000",
+            "Ma-2\t1.5\t39.600000\t2.600000",
+            "Ma-10\t4\t39.750000\t2.750000",
+            "Ma-10\t23\t39.700000\t2.700000",
+            "",
+        ])
+
+    def test_el_manifest_lo_incluye_solo_si_existe(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            for a in manifest.ARCHIVOS:
+                if a["id"] not in manifest.OPCIONALES:
+                    with open(os.path.join(carpeta, a["nombre"]), "wb") as f:
+                        f.write(b"abc")
+            sin = manifest.construir(carpeta, "v", "t", "o/r", None, "T")
+            with open(os.path.join(carpeta, "pk-mallorca.tsv"), "wb") as f:
+                f.write(b"abc")
+            con = manifest.construir(carpeta, "v", "t", "o/r", None, "T")
+        self.assertNotIn("pk", {a["id"] for a in sin["archivos"]})
+        entrada = next(a for a in con["archivos"] if a["id"] == "pk")
+        self.assertEqual(entrada["url"], "https://github.com/o/r/releases/download/t/pk-mallorca.tsv")
+        self.assertEqual(entrada["licencia"], "ODbL-1.0")
+
+    def test_lee_un_pbf_sintetico(self):
+        try:
+            import osmium  # noqa: F401, PLC0415
+        except ImportError:
+            self.skipTest("pyosmium no esta instalado")
+        from osmium.osm import mutable  # noqa: PLC0415
+
+        nodos = [
+            mutable.Node(id=1, location=(2.70, 39.70), tags={"highway": "milestone", "distance": "23", "ref": "Ma-10"}),
+            mutable.Node(id=2, location=(2.71, 39.71), tags={"highway": "milestone", "distance": "24 km",
+                                                              "ref": "Ma-10;Ma-10A"}),
+            mutable.Node(id=3, location=(2.72, 39.72), tags={"highway": "milestone", "name": "km 5"}),
+            mutable.Node(id=4, location=(2.73, 39.73), tags={"highway": "bus_stop", "ref": "Ma-10", "distance": "9"}),
+        ]
+        with tempfile.TemporaryDirectory() as carpeta:
+            pbf = os.path.join(carpeta, "pk.osm.pbf")
+            with osmium.SimpleWriter(pbf) as w:
+                for n in nodos:
+                    w.add_node(n)
+            hitos = pk.leer_osm(pbf)
+        self.assertEqual(
+            sorted((h["ref"], h["km"]) for h in hitos), [("Ma-10", 23.0), ("Ma-10", 24.0), ("Ma-10A", 24.0)])
+        self.assertAlmostEqual(hitos[0]["lat"], 39.70, places=5)
 
 
 if __name__ == "__main__":

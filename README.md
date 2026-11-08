@@ -20,6 +20,7 @@ release y solo baja los que han cambiado.
 | `curvas-mallorca.pmtiles` | Curvas de nivel cada 10 m (capa `curvas`, z11–14; atributos `ele` e `indice` = 1 cada 50 m). Opcional (`id` `curvas`) | MDT05, IGN |
 | `vias-notas-mallorca.tsv.gz` | Etiquetas de vías y nodos de OSM y perfil de altura (5 m) de cada vía, para las notas de rally (formato `#vias-notas v1`, ver abajo). Opcional (`id` `vias-notas`) | OpenStreetMap, MDT05 (IGN) |
 | `radares-mallorca.tsv` | Radares fijos, de tramo y zonas de radar móvil (formato `#radares v1`, ver abajo; pocos KB). Opcional (`id` `radares`) y **en `manifest.json`**, no en el extra | DGT (NAP), OpenStreetMap, informe de cinemómetros de la DGT |
+| `pk-mallorca.tsv` | Hitos kilometricos (`highway=milestone` con `ref` y `distance`) para decir el punto kilometrico en «donde estoy» (formato `#pk v1`, ver abajo; pocos KB). Opcional (`id` `pk`) y **en `manifest.json`** | OpenStreetMap |
 | `voz-sharvard.onnx` y `voz-sharvard-tokens.txt` | Voz Sharvard (Piper es_ES, int8, 22 050 Hz, 21 MB): el modelo y sus tokens, sacados del paquete oficial de sherpa-onnx (`scripts/voz.py`, SHA-256 fijado). Rally Copilot no la empaqueta: la baja al elegirla. Opcionales (`id` `voz-sharvard` y `voz-sharvard-tokens`) y **en `manifest.json`** | Harvard sentences, Univ. de Edimburgo (CC BY 3.0); Piper |
 | `manifest.json` | Índice: versión, tamaño, SHA-256, URL y atribución de cada archivo | Generado |
 | `manifest-extra.json` | Mismo formato que `manifest.json`, solo con los archivos opcionales que las apps ya instaladas no deben bajar (hoy `satelite-z17`). Se omite si no hay ninguno | Generado |
@@ -167,6 +168,16 @@ hay que vaciar `SEPARADOS` en `scripts/manifest.py`, cuando ya no queden apps an
     punto (todas las de hoy: las cabinas) es una fila con `tramo_id` = `id`. Es una zona probable, no un radar confirmado.
   - `id` es único por fila.
 
+### Hitos kilometricos (`pk-mallorca.tsv`)
+
+- `scripts/pk.py` lo genera en el job `build` (sin token) justo despues de los radares, con pyosmium sobre el PBF recortado:
+  nodos `highway=milestone` con la carretera en `ref` (con varias, `;`, una fila por cada una) y el kilometro en `distance`
+  (o `pk`): `23`, `44.8`, `23 km`, `23,5`. Se descartan los nodos sin carretera o sin kilometro legible y los repetidos (misma
+  ref y km a menos de 15 m). Falla el job si salen menos de 20 hitos o alguno fuera del bbox.
+- Formato `#pk v1`: UTF-8, tabuladores; linea 1 `#pk v1`, linea 2 `#ref km lat lon` (separadas por tabulador) y una fila por hito
+  ordenada por carretera, km y posicion: `ref` (como en OSM, `Ma-13`), `km` (decimal con punto) y `lat`/`lon` con 6 decimales.
+- Atribucion: © OpenStreetMap contributors (ODbL-1.0).
+
 ### Placas de carretera
 
 `estilo.mjs` sustituye la capa `roads_shields` de Protomaps (solo pinta rutas con `network`) por tres capas de símbolo con la
@@ -221,6 +232,7 @@ fijadas por SHA y las actualiza Dependabot cada mes.
 
 - `scripts/vias.py`: extrae las vías del PBF a TSV comprimido.
 - `scripts/radares.py`: radares fijos, de tramo y zonas móviles (DGT + OSM) a `radares-mallorca.tsv`; `datos/cinemometros-mallorca.tsv` es el extracto curado del informe de la DGT y `scripts/fixtures/` un recorte real del XML para las pruebas.
+- `scripts/pk.py`: hitos kilometricos de OSM a `pk-mallorca.tsv`.
 - `scripts/vias_notas.py`: etiquetas de OSM y perfil de altura de las vías (`vias-notas-mallorca.tsv.gz`).
 - `scripts/busqueda.py`: genera el índice de búsqueda SQLite (`busqueda-mallorca.sqlite`: `lugares` + `palabras`).
 - `scripts/relieve.sh`: MDT05 por WCS -> `relieve-mallorca.pmtiles` y `curvas-mallorca.pmtiles` (GDAL, tippecanoe).
